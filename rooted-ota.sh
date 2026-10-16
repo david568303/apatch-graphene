@@ -141,9 +141,9 @@ NO_COLOR=${NO_COLOR:-''}
 OTA_BASE_URL="https://releases.grapheneos.org"
 
 # renovate: datasource=github-releases packageName=chenxiaolong/avbroot versioning=semver
-AVB_ROOT_VERSION=3.34.1
+AVB_ROOT_VERSION=3.35.0
 # renovate: datasource=github-releases packageName=chenxiaolong/Custota versioning=semver-coerced
-CUSTOTA_VERSION=6.6
+CUSTOTA_VERSION=6.7
 # renovate: datasource=git-refs packageName=https://github.com/chenxiaolong/my-avbroot-setup currentValue=master
 PATCH_PY_COMMIT=4c7d09c0eda8cb03c859d8315ea748e1978a8a35
 # renovate: datasource=docker packageName=python
