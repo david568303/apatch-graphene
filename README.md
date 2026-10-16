@@ -431,26 +431,6 @@ boots without the injection), so injecting the app is left as an opt-in to inves
 APatch itself does not include Zygisk. If Zygisk is required, install an APatch-compatible Zygisk implementation as an
 APatch module only after the basic APatch boot and root flow has been verified.
 
-##### APatch kernel modules (KPMs)
-
-Kernel modules live under [`kernelpatch-modules/`](kernelpatch-modules) and are built from the same pinned KernelPatch
-source and toolchain as `kpimg` (so their ABI matches). The build fails closed if a module references any symbol
-KernelPatch does not export. The standalone **APatch KPM build** workflow still uploads the raw `.kpm` files as a
-workflow artifact for manual loading.
-
-The build can also **embed** every built `.kpm` into the patched boot image (`kptools -M <kpm> -T kpm`) so KernelPatch
-loads them during kernel init, via `APATCH_EMBED_KPMS=true`. This is **off by default**: on `mustang` an embedded KPM
-bootloops early (stuck at the Google logo, and *not* fixable by disabling verity, because the failure is in the boot
-kernel before userspace), and an embedded module runs on every boot so a faulty one is no longer reboot-recoverable.
-Until embedding is understood on this kernel, ship the OTA without it and load KPMs through the manager after boot.
-
-- `hidemaps` — hides root-tooling lines from `/proc/<pid>/maps` (what "Detected Abnormal Maps" style checks read). It
-  erases only rendered map lines that match a denylist of tooling names (KernelPatch, APatch, `/data/adb`, zygisk,
-  magisk, …), so ordinary mappings are untouched. An opt-in rule (`anonexec on`) additionally hides anonymous executable
-  mappings. Every access to the kernel's seq buffer is bounds-checked, so a layout mismatch disables hiding instead of
-  corrupting output. Control it with the module's control interface: `status`, `enable`/`disable`, `anonexec on|off`,
-  `add <token>`, `clear`.
-
 APatch test builds must remain outside production feeds. Do not lock the bootloader for an APatch test. Keep a known-good
 signed OTA available and verify persistent boot, recovery, the APatch manager, root access, and required modules first.
 

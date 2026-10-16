@@ -77,12 +77,6 @@ APATCH_MANAGER_SHA256=''
 # APK is instead bundled next to the OTA for manual install after boot. Set to
 # 'true' only to investigate the injection path.
 APATCH_PREINSTALL_MANAGER=${APATCH_PREINSTALL_MANAGER:-'false'}
-# Embed the built KPM(s) into the patched boot so they auto-load at kernel init.
-# Default off: on mustang an embedded KPM bootloops early (stuck at the Google
-# logo, not fixable by disabling verity), and an embedded module is not
-# reboot-recoverable. Build KPMs with the standalone APatch KPM build workflow
-# and load them via the manager instead. Set to 'true' only to test embedding.
-APATCH_EMBED_KPMS=${APATCH_EMBED_KPMS:-'false'}
 # APatch 11224 pins KernelPatch 0.13.3, but that image does not boot on
 # mustang. KernelPatch 0.13.9 has been verified with a nonpersistent
 # `fastboot boot` test on mustang. Keep this independently pinned so Renovate
@@ -712,58 +706,6 @@ function buildPinnedKernelPatch() {
   print "Built KernelPatch kptools from commit $KERNELPATCH_COMMIT ($(sha256sum '.tmp/kptools-linux' | awk '{print $1}'))"
 }
 
-# Builds the APatch kernel modules (KPMs) under kernelpatch-modules/ against the
-# pinned KernelPatch headers and toolchain, and collects the .kpm files. These
-# are loaded at runtime via APatch (kpm load) after boot, so a faulty module is
-# recoverable with a reboot; they are intentionally not embedded into kpimg.
-KPM_SOURCE_DIR=${KPM_SOURCE_DIR:-'kernelpatch-modules'}
-function buildAPatchKpm() {
-  if [[ -z "$KERNELPATCH_COMMIT" && "$DEVICE_ID" == 'mustang' ]]; then
-    KERNELPATCH_COMMIT="$MUSTANG_KERNELPATCH_TEST_COMMIT"
-  fi
-  mkdir -p .tmp
-  prepareKernelPatchSource
-  # generated headers (uapi copy etc.) the module tree may include
-  make -C "$KERNELPATCH_SOURCE_DIR/kernel" hdr ANDROID=1 \
-    TARGET_COMPILE="$KERNELPATCH_COMPILE_PREFIX" >/dev/null
-
-  local outDir='.tmp/apatch-kpm'
-  rm -rf "$outDir"
-  mkdir -p "$outDir"
-
-  local built=0 mod name
-  for mod in "$KPM_SOURCE_DIR"/*/; do
-    [[ -f "${mod}Makefile" ]] || continue
-    name="$(basename "$mod")"
-    make -C "$mod" clean >/dev/null 2>&1 || true
-    make -C "$mod" KP_DIR="$(pwd)/$KERNELPATCH_SOURCE_DIR" \
-      TARGET_COMPILE="$KERNELPATCH_COMPILE_PREFIX"
-    if ! ls "$mod"*.kpm >/dev/null 2>&1; then
-      printRed "KPM $name did not produce a .kpm"
-      exit 1
-    fi
-    # fail closed if the module references anything KernelPatch does not export
-    local undef
-    undef=$("${KERNELPATCH_COMPILE_PREFIX}nm" -u "$mod"*.kpm | awk '{print $2}' |
-      grep -vE '^(printk|hook_wrap|hook_wrap[0-9]|unhook|fp_hook|kallsyms_lookup_name|compat_copy_to_user|kfunc_def_|kvmalloc|kvfree|vmalloc|kfree|logkd|logke)$' || true)
-    if [[ -n "$undef" ]]; then
-      printRed "KPM $name has unresolved symbols not exported by KernelPatch:"
-      printRed "$undef"
-      exit 1
-    fi
-    cp "$mod"*.kpm "$outDir/"
-    built=$((built + 1))
-    print "Built KPM $name from KernelPatch $KERNELPATCH_COMMIT ($(sha256sum "$mod"*.kpm | awk '{print $1}'))"
-  done
-
-  if (( built == 0 )); then
-    printRed "No KPMs found under $KPM_SOURCE_DIR/"
-    exit 1
-  fi
-  (cd "$outDir" && sha256sum ./*.kpm > SHA256SUMS)
-  printGreen "APatch KPM(s) in $outDir (load with APatch after boot: kpm load <file>)"
-}
-
 # Builds only the KernelPatch-patched boot.img for hardware testing, without
 # signing keys, avbroot OTA patching or any release. Flash it with
 # `fastboot flash boot` on stock GrapheneOS of the same OTA_VERSION with an
@@ -826,37 +768,6 @@ function patchAPatchBootImage() {
   cp '.tmp/kptools-linux' "$workDir/kptools"
   cp '.tmp/kpimg-android' "$workDir/kpimg"
 
-  # Embed the APatch kernel modules into the patched boot image so they load
-  # automatically during kernel init (production path), instead of requiring a
-  # manual `kpm load` after every boot. The modules are built from the same
-  # pinned KernelPatch source as kpimg, so their ABI matches. Set
-  # APATCH_EMBED_KPMS=false to leave them out and load them by hand instead.
-  # Note: an embedded KPM runs on every boot, so a faulty one is no longer
-  # reboot-recoverable; the nm gate in buildAPatchKpm guards against that.
-  local -a embedArgs=()
-  if [[ "$APATCH_EMBED_KPMS" == 'true' ]]; then
-    if [[ -z "$KERNELPATCH_COMMIT" ]]; then
-      # Embedding needs KPMs built from the same pinned source as kpimg so their
-      # ABI matches. The released-kpimg path has no source commit, so skip it
-      # (load KPMs by hand there) rather than embed an ABI-mismatched module.
-      print 'APATCH_EMBED_KPMS: no pinned KERNELPATCH_COMMIT, skipping KPM embed; load KPMs manually instead.'
-    else
-      buildAPatchKpm
-      mkdir -p "$workDir/kpms"
-      local kpm
-      for kpm in .tmp/apatch-kpm/*.kpm; do
-        [[ -e "$kpm" ]] || continue
-        cp "$kpm" "$workDir/kpms/"
-        embedArgs+=(-M "kpms/$(basename "$kpm")" -T kpm)
-        print "Embedding KPM $(basename "$kpm") into the boot image (auto-loads at boot)."
-      done
-      if [[ ${#embedArgs[@]} -eq 0 ]]; then
-        printRed 'APATCH_EMBED_KPMS=true but no .kpm modules were built to embed.'
-        exit 1
-      fi
-    fi
-  fi
-
   (
     cd "$workDir"
     ./kptools unpack 'extracted/boot.img'
@@ -869,8 +780,7 @@ function patchAPatchBootImage() {
     mv kernel kernel.ori
     # Omitting -S uses APatch 11219+'s signature-authorized manager mode. This
     # avoids putting a reusable, root-equivalent SuperKey into CI or the image.
-    # Each -M/-T pair embeds a KPM (EXTRA_TYPE_KPM) that KernelPatch loads at boot.
-    ./kptools -p -i kernel.ori -k kpimg "${embedArgs[@]}" -o kernel 2>&1 | tee kptools-patch.log
+    ./kptools -p -i kernel.ori -k kpimg -o kernel 2>&1 | tee kptools-patch.log
 
     # KernelPatch can exit successfully and mark an image as patched even when
     # it failed to locate the arm64 relocation table. Such an image is not
