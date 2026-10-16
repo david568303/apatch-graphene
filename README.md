@@ -343,14 +343,14 @@ APatch OTAs are built on demand, one device at a time, with the **Release single
 build without publishing. Nothing builds APatch automatically and no APatch OTA is ever added to a Custota feed
 (`skip-ota-server-upload`).
 
-Persistent APatch installs now boot on `mustang` with the fork's KernelPatch 0.13.9 (the `fix/arm64-image-size` branch
+Persistent APatch installs now boot on `mustang` with the fork's KernelPatch 0.13.9 (the `fix/arm64-mte-image-size` branch
 below); 0.13.3 still does not boot at all. The earlier "persistent bootloop" was **not** a KernelPatch fault — it was an
 install-procedure problem flashing the full OTA, resolved by writing the dynamic partitions through `fastbootd`
 (see [Notes on installing the APatch OTA on mustang](#notes-on-installing-the-apatch-ota-on-mustang)).
 
-For isolated testing, `KERNELPATCH_COMMIT=9a9e876da4bde8047b234561120d46c5db19128e` builds both `kpimg` and `kptools`
-from the [`fix/arm64-image-size`](https://github.com/david568303/KernelPatch/tree/fix/arm64-image-size) branch of the
-KernelPatch fork: upstream `a308d88` (GrapheneOS inlined-kCFI fix) plus two boot fixes described below.
+For isolated testing, `KERNELPATCH_COMMIT=280d32d967feb7ddc0fd1848aa1d1388807945d5` builds both `kpimg` and `kptools`
+from the [`fix/arm64-mte-image-size`](https://github.com/david568303/KernelPatch/tree/fix/arm64-mte-image-size) branch of the
+KernelPatch fork: upstream `main` (`ef52c62`) plus two boot fixes described below.
 The compiler archive, source commit, and APatch manager are all pinned or digest-verified.
 
 KernelPatch copies its start image to just past the kernel's declared arm64 `image_size`, which the boot protocol does
@@ -363,10 +363,8 @@ The hardware test of that fix still bootlooped with `Early Kernel PANIC`. The ca
 turns into a fatal fault. QEMU with `mte=on` reproduced the panic; with the second fix the kernel boots there, including
 Android's first- and second-stage init from the real GrapheneOS ramdisks, with no KASAN reports.
 
-With both fixes the patched kernel boots on mustang, but the APatch manager could not get root: upstream KernelPatch
-trusts a manager APK only if it carries a lone v2 signature, and official APatch releases are signed v1+v2+v3. The fork
-instead requires every v2/v3/v3.1 block present to carry the APatch certificate, so whichever block Android verified is
-the trusted signer.
+With both fixes the patched kernel boots on mustang. The APatch manager may still be refused root: official APatch
+releases are signed v1+v2+v3 and how this KernelPatch authorizes a multi-scheme manager signature is being investigated.
 
 To test it without the full avbroot flow, run the **APatch boot image test** workflow. It produces a workflow artifact
 (nothing is released) with the patched `boot.img`, the matching stock `boot.img`, and the `kptools` log. On a device

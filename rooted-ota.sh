@@ -105,16 +105,13 @@ APATCH_BOOT_IMAGE=''
 KERNELPATCH_SOURCE_REPO=${KERNELPATCH_SOURCE_REPO:-'https://github.com/david568303/KernelPatch.git'}
 KERNELPATCH_TOOLCHAIN_URL='https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz'
 KERNELPATCH_TOOLCHAIN_SHA256='62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f39415aab528daf'
-# fix/arm64-image-size in the fork: upstream a308d88 (GrapheneOS arm64
-# inlined-kCFI fix #311, boot-image padding fix #316) plus:
+# fix/arm64-mte-image-size in the fork: upstream main ef52c62 plus:
 # - kptools reserves the region KernelPatch copies its start image to, so the
 #   bootloader cannot place the ramdisk/DTB there
 # - cred offset scans stay inside the slab object; GrapheneOS enables MTE with
 #   kasan.fault=panic, and the out-of-bounds read was the mustang "Early
 #   Kernel PANIC" (reproduced in QEMU with mte=on)
-# - the official APatch manager (signed v1+v2+v3) is trusted again; upstream
-#   accepted only a lone v2 signature, so root was always refused
-MUSTANG_KERNELPATCH_TEST_COMMIT='9a9e876da4bde8047b234561120d46c5db19128e'
+MUSTANG_KERNELPATCH_TEST_COMMIT='280d32d967feb7ddc0fd1848aa1d1388807945d5'
 
 SKIP_CLEANUP=${SKIP_CLEANUP:-''}
 
