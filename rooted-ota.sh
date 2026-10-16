@@ -89,7 +89,9 @@ KERNELPATCH_TOOLCHAIN_SHA256='62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f
 # - cred offset scans stay inside the slab object; GrapheneOS enables MTE with
 #   kasan.fault=panic, and the out-of-bounds read was the mustang "Early
 #   Kernel PANIC" (reproduced in QEMU with mte=on)
-MUSTANG_KERNELPATCH_TEST_COMMIT='280d32d967feb7ddc0fd1848aa1d1388807945d5'
+# Used by every device (resolveAPatchRelease defaults KERNELPATCH_COMMIT to
+# this when unset), not just mustang.
+KERNELPATCH_FORK_COMMIT='280d32d967feb7ddc0fd1848aa1d1388807945d5'
 
 SKIP_CLEANUP=${SKIP_CLEANUP:-''}
 
@@ -417,6 +419,13 @@ function resolveAPatchRelease() {
   local endpoint releaseJson managerJson source kernelPatchLine apatchKernelPatchVersion
   local kernelReleaseJson='' kpimgJson kptoolsJson
 
+  # Every device builds APatch's KernelPatch from this repo's fork (not the
+  # official release): it carries fixes GrapheneOS's kernel needs (notably
+  # the MTE-safe cred scan) that upstream does not have yet. Only mustang is
+  # hardware-validated on it so far; other devices are untested here, same
+  # as they were untested on the official release before this changed.
+  : "${KERNELPATCH_COMMIT:=$KERNELPATCH_FORK_COMMIT}"
+
   if [[ -n "$APATCH_MANAGER_URL" && -n "$KERNELPATCH_KPIMG_URL" && -n "$KERNELPATCH_KPTOOLS_URL" ]]; then
     return
   fi
@@ -584,9 +593,6 @@ function buildPinnedKernelPatch() {
 function createAPatchTestBootImage() {
   SKIP_APATCH='false'
   APATCH_BOOT_TEST='true'
-  if [[ -z "$KERNELPATCH_COMMIT" && "$DEVICE_ID" == 'mustang' ]]; then
-    KERNELPATCH_COMMIT="$MUSTANG_KERNELPATCH_TEST_COMMIT"
-  fi
 
   findLatestVersion
   mkdir -p .tmp
@@ -612,13 +618,14 @@ function patchAPatchBootImage() {
   local workDir=".tmp/apatch-${DEVICE_ID}-${OTA_VERSION}"
   local extractedDir="$workDir/extracted"
 
-  if [[ "$DEVICE_ID" == 'mustang' && "$ALLOW_UNVERIFIED_APATCH" != 'true' && "${APATCH_BOOT_TEST:-}" != 'true' ]]; then
-    # mustang is hardware-validated only with the pinned KernelPatch fork commit
-    # (released 0.13.3/0.13.9 bootloop). Allow any build that uses the pin;
-    # block one that doesn't, so a stray default build can't ship a bad image.
-    if [[ "$KERNELPATCH_COMMIT" != "$MUSTANG_KERNELPATCH_TEST_COMMIT" ]]; then
-      printRed 'APatch on mustang requires the hardware-validated pinned KernelPatch commit.'
-      printRed "Set KERNELPATCH_COMMIT=$MUSTANG_KERNELPATCH_TEST_COMMIT (or ALLOW_UNVERIFIED_APATCH=true to override)."
+  if [[ "$ALLOW_UNVERIFIED_APATCH" != 'true' && "${APATCH_BOOT_TEST:-}" != 'true' ]]; then
+    # Every device builds from the pinned KernelPatch fork commit (only
+    # mustang is hardware-validated on it so far). Allow any build that uses
+    # the pin; block one that doesn't, so a stray default build can't ship
+    # an unpinned image.
+    if [[ "$KERNELPATCH_COMMIT" != "$KERNELPATCH_FORK_COMMIT" ]]; then
+      printRed 'APatch requires the pinned KernelPatch fork commit.'
+      printRed "Set KERNELPATCH_COMMIT=$KERNELPATCH_FORK_COMMIT (or ALLOW_UNVERIFIED_APATCH=true to override)."
       exit 1
     fi
   fi

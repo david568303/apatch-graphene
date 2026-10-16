@@ -16,7 +16,7 @@ on:
         required: false
         default: latest
       kernelpatch-commit:
-        description: KernelPatch source commit (empty uses the pinned mustang test commit)
+        description: KernelPatch source commit (empty uses the pinned fork commit)
         required: false
         default: ''
 
