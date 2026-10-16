@@ -61,9 +61,6 @@ GrapheneOS over the air updates (OTAs) patched with KernelPatch allowing for AVB
 
 
 
-If `system` does not match the signed vbmeta, dm-verity cannot build its table and init aborts — which on screen looks
-like a generic boot loop. The kernel log of the failed boot (`/sys/fs/pstore/console-ramoops-0`, readable over `adb`
-after booting any working image) shows the real cause:
 
 ### Credits
 [schatterer](https://github.com/schnatterer)
