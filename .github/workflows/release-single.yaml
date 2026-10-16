@@ -5,25 +5,14 @@ on:
     inputs:
       device-id:
         type: string
-      magisk-preinit-device:
-        type: string
-        default: ''
-      skip-rooted:
-        description: skip all rooted OTA flavors
-        type: boolean
-        default: false
       skip-rootless:
         description: skip building the rootless OTA
         type: boolean
         default: false
-      skip-pixincreate:
-        description: skip building the pixincreate Magisk OTA
-        type: boolean
-        default: true
       skip-apatch:
-        description: skip building the APatch OTA (APatch only builds with skip-release)
+        description: skip building the APatch OTA
         type: boolean
-        default: true
+        default: false
       apatch-version:
         description: APatch version or latest
         type: string
@@ -34,14 +23,6 @@ on:
         default: ''
       kernelpatch-commit:
         description: Optional pinned KernelPatch source commit for a test build
-        type: string
-        default: ''
-      pixincreate-version:
-        description: pixincreate Magisk version or latest
-        type: string
-        default: ''
-      pixincreate-apk-name:
-        description: optional pixincreate release asset name override
         type: string
         default: ''
       ota-version:
@@ -87,27 +68,15 @@ on:
       device-id:
         description: Device ID
         required: true
-      magisk-preinit-device:
-        description: Magisk preinit device
-        required: false
       skip-rootless:
         description: skip building rootless OTA
         type: boolean
         required: false
-      skip-rooted:
-        description: skip all rooted OTA flavors
-        type: boolean
-        required: false
-      skip-pixincreate:
-        description: skip building OTA rooted with pixincreate's magisk fork
-        type: boolean
-        required: false
-        default: true
       skip-apatch:
-        description: skip building OTA rooted with APatch (APatch only builds with skip-release)
+        description: skip building the APatch OTA
         type: boolean
         required: false
-        default: true
+        default: false
       upload-test-ota:
         description: Upload OTA to test folder
         required: false
@@ -134,12 +103,6 @@ on:
         type: boolean
       ota-version:
         description: OTA version
-        required: false
-      pixincreate-version:
-        description: pixincreate Magisk version or latest
-        required: false
-      pixincreate-apk-name:
-        description: optional pixincreate release asset name override
         required: false
       apatch-version:
         description: APatch version or latest
@@ -174,17 +137,12 @@ jobs:
         # Empty means, use version defined in rooted-ota.sh
         env:
           DEVICE_ID_INPUT: ${{ inputs.device-id || 'mustang' }}
-          MAGISK_PREINIT_DEVICE_INPUT: ${{ inputs.magisk-preinit-device || 'sda10' }}
-          PIXINCREATE_VERSION_INPUT: ${{ inputs.pixincreate-version || '' }}
-          PIXINCREATE_APK_NAME_INPUT: ${{ inputs.pixincreate-apk-name || '' }}
           APATCH_VERSION_INPUT: ${{ inputs.apatch-version || '' }}
           KERNELPATCH_VERSION_INPUT: ${{ inputs.kernelpatch-version || '' }}
           KERNELPATCH_COMMIT_INPUT: ${{ inputs.kernelpatch-commit || '' }}
           OTA_VERSION_INPUT: ${{ inputs.ota-version || '' }}
-          SKIP_ROOTED_INPUT: ${{ toJSON(inputs.skip-rooted) == 'true' && 'true' || 'false' }}
           SKIP_ROOTLESS_INPUT: ${{ toJSON(inputs.skip-rootless) == 'true' && 'true' || 'false' }}
-          SKIP_PIXINCREATE_INPUT: ${{ toJSON(inputs.skip-pixincreate) == 'false' && 'false' || 'true' }}
-          SKIP_APATCH_INPUT: ${{ toJSON(inputs.skip-apatch) == 'false' && 'false' || 'true' }}
+          SKIP_APATCH_INPUT: ${{ toJSON(inputs.skip-apatch) == 'true' && 'true' || 'false' }}
           FORCE_OTA_SERVER_UPLOAD_INPUT: ${{ toJSON(inputs.force-ota-server-upload) == 'true' && 'true' || 'false' }}
           FORCE_BUILD_INPUT: ${{ toJSON(inputs.force-build) == 'true' && 'true' || 'false' }}
           UPLOAD_TEST_OTA_INPUT: ${{ toJSON(inputs.upload-test-ota) == 'true' && 'true' || 'false' }}
@@ -196,12 +154,6 @@ jobs:
         run: |
           {
             echo "DEVICE_ID=$(echo "$DEVICE_ID_INPUT" | xargs)"
-            if [[ "$SKIP_ROOTED_INPUT" != "true" ]]; then
-              echo "MAGISK_PREINIT_DEVICE=$(echo "$MAGISK_PREINIT_DEVICE_INPUT" | xargs)"
-            fi
-
-            echo "PIXINCREATE_VERSION=$(echo "$PIXINCREATE_VERSION_INPUT" | xargs)"
-            echo "PIXINCREATE_APK_NAME=$(echo "$PIXINCREATE_APK_NAME_INPUT" | xargs)"
             echo "APATCH_VERSION=$(echo "$APATCH_VERSION_INPUT" | xargs)"
             echo "KERNELPATCH_VERSION=$(echo "$KERNELPATCH_VERSION_INPUT" | xargs)"
             echo "KERNELPATCH_COMMIT=$(echo "$KERNELPATCH_COMMIT_INPUT" | xargs)"
@@ -210,7 +162,6 @@ jobs:
             echo "FORCE_BUILD=$FORCE_BUILD_INPUT"
             echo "UPLOAD_TEST_OTA=$UPLOAD_TEST_OTA_INPUT"
             echo "SKIP_ROOTLESS=$SKIP_ROOTLESS_INPUT"
-            echo "SKIP_PIXINCREATE=$SKIP_PIXINCREATE_INPUT"
             echo "SKIP_APATCH=$SKIP_APATCH_INPUT"
             echo "SKIP_RELEASE=$SKIP_RELEASE_INPUT"
             echo "ALLOW_APATCH_RELEASE=$ALLOW_APATCH_RELEASE_INPUT"

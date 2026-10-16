@@ -30,20 +30,12 @@
       automerge: true,
     },
     {
-      matchPackageNames: [
-        'pixincreate/Magisk',
-      ],
-      description: 'Require review for third-party root package updates',
-      automerge: false,
-    },
-    {
       matchFileNames: [
         'rooted-ota.sh',
         '.github/workflows/release-single.yaml',
         '.github/workflows/renovate.yaml',
       ],
       matchPackageNames: [
-        '!pixincreate/Magisk',
         '!bmax121/APatch',
         '!bmax121/KernelPatch',
       ],

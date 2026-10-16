@@ -1,0 +1,68 @@
+name: Automatic APatch OTAs
+
+# Publishes APatch (KernelPatch) release assets for all devices as a GitHub
+# pre-release (its own `<version>-apatch` tag, so it shows in the releases
+# list but never becomes "Latest" and never touches the stable release). It
+# deliberately does NOT update the Custota OTA feed, so a new APatch build is
+# never auto-pushed to users as a seamless update — they opt in by
+# downloading and flashing (or sideloading, once already on a build from this
+# repo; see README).
+#
+# A single cheap `detect` job decides which devices still need an APatch
+# build for the current release, so idle runs cost one job instead of one
+# per device.
+
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: automatic-apatch-otas
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.gate.outputs.matrix }}
+      any: ${{ steps.gate.outputs.any }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Decide which devices need an APatch build
+        id: gate
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash -c '. rooted-ota.sh && emitBuildMatrix apatch \
+            stallion rango mustang blazer frankel \
+            tegu comet komodo caiman tokay \
+            akita husky shiba felix tangorpro \
+            lynx cheetah panther bluejay raven \
+            oriole' >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: detect
+    if: needs.detect.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      # Limit simultaneous multi-gigabyte downloads and gh-pages pushes.
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    uses: ./.github/workflows/release-single.yaml
+    secrets: inherit
+    with:
+      device-id: ${{ matrix.device-id }}
+      skip-rootless: true
+      skip-apatch: false
+      # Own release, marked pre-release so it never becomes "Latest".
+      release-tag-suffix: '-apatch'
+      release-prerelease: true
+      # Assets only; do not auto-push APatch via the Custota seamless-update feed.
+      allow-apatch-release: true
+      skip-ota-server-upload: true

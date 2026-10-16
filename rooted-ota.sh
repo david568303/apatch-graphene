@@ -24,28 +24,21 @@ GITHUB_TOKEN=${GITHUB_TOKEN:-''}
 GITHUB_REPO=${GITHUB_REPO:-''}
 
 # Optional
-# If you want an OTA patched with pixincreate's magisk fork, set the preinit for your device
-MAGISK_PREINIT_DEVICE=${MAGISK_PREINIT_DEVICE:-}
 # Skip creation of rootless OTA by setting to "true"
 SKIP_ROOTLESS=${SKIP_ROOTLESS:-'false'}
-# An OTA can be patched with pixincreate's magisk fork,
-# which contains patches that make zygisk work on GrapheneOS.
-# https://github.com/pixincreate/Magisk
-# Note that modules verifying magisk's signature won't work with this fork.
-# Enable by setting to "false".
-SKIP_PIXINCREATE=${SKIP_PIXINCREATE:-'true'}
-# APatch patches the kernel in boot.img. It is kept as a separate flavor and is
-# disabled by default until explicitly requested.
-SKIP_APATCH=${SKIP_APATCH:-'true'}
+# APatch (KernelPatch) is the only rooted flavor. Skip creation of the rooted
+# OTA by setting to "true".
+SKIP_APATCH=${SKIP_APATCH:-'false'}
 # A RAM-booted KernelPatch image is not enough to establish that a flashed,
-# verified image works. mustang remains blocked after both 0.13.3 and 0.13.9
-# bootlooped when installed persistently. This escape hatch is intentionally
-# not exposed by the GitHub workflows.
+# verified image works. mustang is only hardware-validated with the pinned
+# KernelPatch fork commit (see patchAPatchBootImage); this escape hatch lets
+# a build use an unpinned/default KernelPatch version instead and is
+# intentionally not exposed by the GitHub workflows.
 ALLOW_UNVERIFIED_APATCH=${ALLOW_UNVERIFIED_APATCH:-'false'}
-# APatch OTAs are never published (no release assets, no OTA feed, test feed
-# included) while the KernelPatch bootloop is unresolved. APatch can still be
-# built with SKIP_RELEASE. This escape hatch is intentionally not exposed by
-# the GitHub workflows.
+# Publishing an APatch OTA (release assets and/or the Custota feed) requires
+# this explicit opt-in, so an automated run never ships an unreviewed APatch
+# build; the automatic APatch OTA workflow sets this itself. APatch can still
+# be built without publishing via SKIP_RELEASE.
 ALLOW_APATCH_RELEASE=${ALLOW_APATCH_RELEASE:-'false'}
 # Optional suffix appended to the GitHub release tag (e.g. '-apatch' so APatch
 # gets its own release and does not share the stable release's tag), and whether
@@ -54,15 +47,6 @@ RELEASE_TAG_SUFFIX=${RELEASE_TAG_SUFFIX:-''}
 RELEASE_PRERELEASE=${RELEASE_PRERELEASE:-'false'}
 # https://grapheneos.org/releases#stable-channel
 OTA_VERSION=${OTA_VERSION:-'latest'}
-
-# Pixincreate's fork publishes its own versions and APK names.
-# renovate: datasource=github-releases packageName=pixincreate/Magisk versioning=loose
-DEFAULT_PIXINCREATE_VERSION=v31.0-3
-PIXINCREATE_VERSION=${PIXINCREATE_VERSION:-${DEFAULT_PIXINCREATE_VERSION}}
-PIXINCREATE_APK_NAME=${PIXINCREATE_APK_NAME:-''}
-PIXINCREATE_APK_PATH=''
-PIXINCREATE_APK_URL=''
-PIXINCREATE_APK_SHA256=''
 
 # APatch and its matching KernelPatch tools are resolved from their official
 # GitHub releases. "latest" always means the newest stable APatch release.
@@ -182,8 +166,8 @@ function key2base64() {
 
 function createAndReleaseRootedOta() {
   if [[ "$SKIP_APATCH" != 'true' && "$ALLOW_APATCH_RELEASE" != 'true' ]]; then
-    printRed 'APatch OTAs are not published while the KernelPatch bootloop is unresolved.'
-    printRed 'Set SKIP_APATCH=true to release the other flavors, or SKIP_RELEASE to build APatch without publishing.'
+    printRed 'Publishing an APatch OTA requires an explicit opt-in (ALLOW_APATCH_RELEASE=true).'
+    printRed 'Set SKIP_APATCH=true to release the rootless flavor only, or SKIP_RELEASE to build APatch without publishing.'
     exit 1
   fi
 
@@ -222,18 +206,6 @@ function checkBuildNecessary() {
   currentCommit=$(git rev-parse --short HEAD)
   POTENTIAL_ASSETS=()
     
-  if [[ -n "$MAGISK_PREINIT_DEVICE" ]]; then
-    if [[ "$SKIP_PIXINCREATE" != 'true' ]]; then
-      resolvePixincreateApk
-      # e.g. oriole-2023121200-pixincreate-v31.0-3-4647f74-dirty.zip
-      POTENTIAL_ASSETS['pixincreate']="${DEVICE_ID}-${OTA_VERSION}-${currentCommit}-pixincreate-${PIXINCREATE_VERSION}$(createAssetSuffix).zip"
-    else
-      printGreen "SKIP_PIXINCREATE set, not creating pixincreate OTA"
-    fi
-  else 
-    printGreen "MAGISK_PREINIT_DEVICE not set for device, not creating pixincreate OTA"
-  fi
-
   if [[ "$SKIP_APATCH" != 'true' ]]; then
     resolveAPatchRelease
     # e.g. mustang-2026092501-4647f74-apatch-11224-kp0.13.3-test.zip
@@ -321,16 +293,15 @@ function checkMandatoryVariable() {
 # an over-inclusive matrix just early-exits cheaply. If every lookup fails, every
 # device is included and behaviour matches the pre-gate workflow.
 #
-# Usage: emitBuildMatrix <flavorKeyword> <device:preinit> [<device:preinit> ...]
+# Usage: emitBuildMatrix <flavorKeyword> <device> [<device> ...]
 function emitBuildMatrix() {
   local flavor="$1"; shift
   local releases params=(-H "Accept: application/vnd.github.v3+json")
   [[ -n "${GITHUB_TOKEN:-}" ]] && params+=(-H "Authorization: token ${GITHUB_TOKEN}")
   releases=$(curl --fail -sL "${params[@]}" "https://api.github.com/repos/${GITHUB_REPO}/releases" 2>/dev/null) || releases=''
 
-  local include=() pair dev preinit ver assets
-  for pair in "$@"; do
-    dev="${pair%%:*}"; preinit="${pair#*:}"
+  local include=() dev ver assets
+  for dev in "$@"; do
     ver=$(curl --fail -sL "$OTA_BASE_URL/$dev-$OTA_CHANNEL" 2>/dev/null | head -n1 | awk '{print $1}') || ver=''
     if [[ -n "$ver" && -n "$releases" ]]; then
       # Search assets across all releases so a flavor in its own release tag
@@ -342,7 +313,7 @@ function emitBuildMatrix() {
         continue
       fi
     fi
-    include+=("{\"device-id\":\"${dev}\",\"magisk-preinit-device\":\"${preinit}\"}")
+    include+=("{\"device-id\":\"${dev}\"}")
   done
 
   local joined
@@ -369,11 +340,6 @@ function downloadAndroidDependencies() {
   checkMandatoryVariable 'OTA_TARGET'
 
   mkdir -p .tmp
-  if [[ "${POTENTIAL_ASSETS['pixincreate']+isset}" ]]; then
-    checkMandatoryVariable 'PIXINCREATE_VERSION'
-    downloadPixincreateApk
-  fi
-
   if [[ "${POTENTIAL_ASSETS['apatch']+isset}" ]]; then
     downloadAPatchDependencies
   fi
@@ -385,11 +351,6 @@ function downloadAndroidDependencies() {
 
 function findLatestVersion() {
   checkMandatoryVariable DEVICE_ID
-
-  if [[ -n "$MAGISK_PREINIT_DEVICE" && "$SKIP_PIXINCREATE" != 'true' ]]; then
-    resolvePixincreateRelease
-    print "Pixincreate version: $PIXINCREATE_VERSION; APK: $PIXINCREATE_APK_NAME"
-  fi
 
   if [[ "$SKIP_APATCH" != 'true' ]]; then
     resolveAPatchRelease
@@ -410,25 +371,6 @@ function findLatestVersion() {
   print "OTA target: $OTA_TARGET; OTA URL: $OTA_URL"
 }
 
-function downloadPixincreateApk() {
-  resolvePixincreateApk
-  local targetFile="$PIXINCREATE_APK_PATH"
-  local downloadFile="$targetFile.download"
-
-  if [[ -f "$targetFile" ]]; then
-    if echo "$PIXINCREATE_APK_SHA256  $targetFile" | sha256sum --check --status; then
-      return
-    fi
-    printRed "Cached pixincreate APK failed SHA-256 verification; downloading it again"
-    rm -f "$targetFile"
-  fi
-
-  rm -f "$downloadFile"
-  curl --fail --retry 3 -sLo "$downloadFile" "$PIXINCREATE_APK_URL"
-  echo "$PIXINCREATE_APK_SHA256  $downloadFile" | sha256sum --check --status
-  mv "$downloadFile" "$targetFile"
-}
-
 function githubApiGet() {
   local url="$1"
   local params=(--fail --retry 3 --retry-all-errors -sL \
@@ -440,77 +382,6 @@ function githubApiGet() {
   fi
 
   curl "${params[@]}" "$url"
-}
-
-function resolvePixincreateRelease() {
-  local endpoint releaseJson assetJson digest preferredApkName requestedApkName
-  checkMandatoryVariable 'PIXINCREATE_VERSION'
-
-  requestedApkName="$PIXINCREATE_APK_NAME"
-  if [[ "$PIXINCREATE_VERSION" == 'latest' ]]; then
-    endpoint='https://api.github.com/repos/pixincreate/Magisk/releases/latest'
-  else
-    validatePixincreateVersion
-    endpoint="https://api.github.com/repos/pixincreate/Magisk/releases/tags/$PIXINCREATE_VERSION"
-  fi
-
-  releaseJson=$(githubApiGet "$endpoint")
-  if [[ "$(jq -er '.draft' <<< "$releaseJson")" != 'false' ]]; then
-    printRed "Refusing to use a draft pixincreate release"
-    exit 1
-  fi
-
-  PIXINCREATE_VERSION=$(jq -er '.tag_name' <<< "$releaseJson")
-  validatePixincreateVersion
-  preferredApkName="Magisk-$PIXINCREATE_VERSION.apk"
-
-  if [[ -n "$requestedApkName" ]]; then
-    PIXINCREATE_APK_NAME="$requestedApkName"
-    validatePixincreateApkName
-    assetJson=$(jq -cer --arg name "$PIXINCREATE_APK_NAME" \
-      '([.assets[] | select(.name == $name)] | first) // error("requested APK asset not found")' \
-      <<< "$releaseJson")
-  else
-    assetJson=$(jq -cer --arg preferred "$preferredApkName" \
-      '([.assets[] | select(.name == $preferred)] + [.assets[] | select(.name == "app-release.apk")] | first) // error("no supported APK asset found")' \
-      <<< "$releaseJson")
-    PIXINCREATE_APK_NAME=$(jq -er '.name' <<< "$assetJson")
-    validatePixincreateApkName
-  fi
-
-  PIXINCREATE_APK_URL=$(jq -er '.browser_download_url' <<< "$assetJson")
-  digest=$(jq -er '.digest' <<< "$assetJson")
-  if [[ "$digest" != sha256:* ]]; then
-    printRed "GitHub did not provide a SHA-256 digest for $PIXINCREATE_APK_NAME"
-    exit 1
-  fi
-  PIXINCREATE_APK_SHA256=${digest#sha256:}
-  if [[ ! "$PIXINCREATE_APK_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-    printRed "Invalid SHA-256 digest for $PIXINCREATE_APK_NAME"
-    exit 1
-  fi
-}
-
-function resolvePixincreateApk() {
-  if [[ -z "$PIXINCREATE_APK_URL" || -z "$PIXINCREATE_APK_SHA256" || -z "$PIXINCREATE_APK_NAME" ]]; then
-    resolvePixincreateRelease
-  fi
-  validatePixincreateVersion
-  PIXINCREATE_APK_PATH=".tmp/pixincreate-$PIXINCREATE_VERSION-$PIXINCREATE_APK_NAME"
-}
-
-function validatePixincreateVersion() {
-  if [[ ! "$PIXINCREATE_VERSION" =~ ^[A-Za-z0-9._+-]+$ ]]; then
-    printRed "Invalid PIXINCREATE_VERSION: $PIXINCREATE_VERSION"
-    exit 1
-  fi
-}
-
-function validatePixincreateApkName() {
-  if [[ "$PIXINCREATE_APK_NAME" == */* || "$PIXINCREATE_APK_NAME" == '.' || "$PIXINCREATE_APK_NAME" == '..' ]]; then
-    printRed "PIXINCREATE_APK_NAME must be a release asset file name, not a path: $PIXINCREATE_APK_NAME"
-    exit 1
-  fi
 }
 
 function validateReleaseVersion() {
@@ -971,11 +842,6 @@ function patchOTAs() {
       args+=("--sign-key-avb" "$KEY_AVB")
       args+=("--sign-key-ota" "$KEY_OTA")
       args+=("--sign-cert-ota" "$CERT_OTA")
-      if [[ "$flavor" == 'pixincreate' ]]; then
-        resolvePixincreateApk
-        args+=("--patch-arg=--magisk" "--patch-arg" "$PIXINCREATE_APK_PATH")
-        args+=("--patch-arg=--magisk-preinit-device" "--patch-arg" "$MAGISK_PREINIT_DEVICE")
-      fi
       if [[ "$flavor" == 'apatch' ]]; then
         args+=("--patch-arg=--prepatched" "--patch-arg" "$APATCH_BOOT_IMAGE")
         if [[ "$APATCH_PREINSTALL_MANAGER" == 'true' ]]; then
