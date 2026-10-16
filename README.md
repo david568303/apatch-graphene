@@ -53,46 +53,13 @@ GrapheneOS over the air updates (OTAs) patched with KernelPatch allowing for AVB
 
 ### Patch GrapheneOS with OTAs from this image
 
-Once GrapheneOS is installed
+  Once GrapheneOS is installed
 
-* Download the [OTA from releases](https://github.com/rooted-graphene/ota/releases) with **the same version** (except `00` at the end is `01`, see [security-preview](#173-sept-27-2025)) that you just installed. 
-* Obtain latest `fastboot`
-* Install [avbroot](https://github.com/chenxiaolong/avbroot)
-* Extract the partition images from the patched OTA that are different from the original.
-    ```bash
-    avbroot ota extract \
-        --input /path/to/ota.zip.patched \
-        --directory extracted \
-        --fastboot
-    ```
-* Set this environment variable to match the extracted folder:
+  * Download the [OTA from releases](https://github.com/rooted-graphene/ota/releases) with **the same version** (except `00` at the end is `01`, see [security-preview](#173-sept-27-2025)) that you just installed. 
+  * Obtain latest `fastboot`
+  * Install [avbroot](https://github.com/chenxiaolong/avbroot)
 
-  For Linux/macOS:
-  ```bash
-  export ANDROID_PRODUCT_OUT=extracted
-  ```
 
-  For Windows (powershell):
-  ```powershell
-  $env:ANDROID_PRODUCT_OUT = "extracted"
-  ```
-  or (bat):
-  ```bat
-  set ANDROID_PRODUCT_OUT=extracted
-  ```
-
-* Flash the partitions using the command:
-  ```bash
-  fastboot flashall --skip-reboot
-  ```
-* Set up the custom AVB public key in the bootloader.
-  (If you built your own OTA, use your `avb_pkmd.bin`.)
-    ```bash
-    fastboot reboot-bootloader
-    fastboot erase avb_custom_key
-    curl -s https://raw.githubusercontent.com/rooted-graphene/ota/refs/heads/main/avb_pkmd.bin > avb_pkmd.bin
-    fastboot flash avb_custom_key avb_pkmd.bin
-    ```
 
 If `system` does not match the signed vbmeta, dm-verity cannot build its table and init aborts — which on screen looks
 like a generic boot loop. The kernel log of the failed boot (`/sys/fs/pstore/console-ramoops-0`, readable over `adb`
