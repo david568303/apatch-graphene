@@ -51,7 +51,7 @@ OTA_VERSION=${OTA_VERSION:-'latest'}
 # APatch and its matching KernelPatch tools are resolved from their official
 # GitHub releases. "latest" always means the newest stable APatch release.
 # renovate: datasource=github-releases packageName=bmax121/APatch versioning=loose
-DEFAULT_APATCH_VERSION=11224
+DEFAULT_APATCH_VERSION=11282
 APATCH_VERSION=${APATCH_VERSION:-${DEFAULT_APATCH_VERSION}}
 APATCH_MANAGER_URL=''
 APATCH_MANAGER_SHA256=''
