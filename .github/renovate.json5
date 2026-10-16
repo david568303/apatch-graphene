@@ -48,6 +48,7 @@
       customType: 'regex',
       managerFilePatterns: [
         '/rooted-ota.sh/',
+        '/flash-ota.sh/',
       ],
       matchStrings: [
         '# renovate: datasource=(?<datasource>[a-z-]+?)(?: depName=(?<depName>.+?))? packageName=(?<packageName>.+?)(?: versioning=(?<versioning>[a-z-]+?))?\\s.+?_VERSION=(?<currentValue>.+?)\\s',
