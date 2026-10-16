@@ -58,6 +58,7 @@ GrapheneOS over the air updates (OTAs) patched with KernelPatch allowing for AVB
   * Download the [OTA from releases](https://github.com/rooted-graphene/ota/releases) with **the same version** (except `00` at the end is `01`, see [security-preview](#173-sept-27-2025)) that you just installed. 
   * Obtain latest `fastboot`
   * Install [avbroot](https://github.com/chenxiaolong/avbroot)
+  * Download `flash-ota.sh` (Linux/macOS) or `flash-ota.bat` (Windows) from the same release and place it next to the OTA zip, then run it — it flashes every partition and offers to lock the bootloader once GrapheneOS boots.
 
 
 
