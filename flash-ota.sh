@@ -31,12 +31,15 @@ set -uo pipefail
 # stop the script is run through run() below, which checks its exit status
 # explicitly.
 
-# renovate: datasource=github-releases packageName=chenxiaolong/avbroot versioning=semver
+# AVB_ROOT_VERSION and RELEASES_URL are overwritten with the release build's own
+# values (rooted-ota.sh renderFlashOtaInstallers) so they can never drift from
+# the avbroot that signed the OTA or from the repo's current name; the values
+# here only matter if you run this file straight from the repository.
 AVB_ROOT_VERSION=3.35.0
+RELEASES_URL='https://github.com/david568303/apatch-graphene/releases'
 MIN_FASTBOOT_VERSION='35.0.1'
 CHENXIAOLONG_PK='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDOe6/tBnO7xZhAWXRj3ApUYgn+XZ0wnQiXM8B7tPgv4'
 AVB_PKMD='avb_pkmd.bin'
-RELEASES_URL='https://github.com/david568303/rooted-graphene/releases'
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"

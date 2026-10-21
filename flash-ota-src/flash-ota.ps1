@@ -1,5 +1,8 @@
 $ErrorActionPreference = 'Stop'
-$AvbRootVersion = '3.35.0' # renovate: datasource=github-releases packageName=chenxiaolong/avbroot versioning=semver
+# $AvbRootVersion and $ReleasesUrl are overwritten with the release build's own
+# values (rooted-ota.sh renderFlashOtaInstallers); see flash-ota.sh.
+$AvbRootVersion = '3.35.0'
+$ReleasesUrl = 'https://github.com/david568303/apatch-graphene/releases'
 $MinFastboot = [version]'35.0.1'
 $ChenxiaolongPk = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDOe6/tBnO7xZhAWXRj3ApUYgn+XZ0wnQiXM8B7tPgv4'
 $AvbPkmd = 'avb_pkmd.bin'
@@ -67,7 +70,7 @@ if (-not $m.Success) {
 # 2. OTA selection
 $otas = @(Get-ChildItem -Filter *.zip -File | Select-Object -ExpandProperty Name)
 if ($otas.Count -eq 0) {
-  Fail "No OTA zip found in $(Get-Location). Download one from https://github.com/david568303/rooted-graphene/releases and place it next to this script."
+  Fail "No OTA zip found in $(Get-Location). Download one from $ReleasesUrl and place it next to this script."
 } elseif ($otas.Count -eq 1) {
   $otaFile = $otas[0]
   Info "Found one OTA: $otaFile"
