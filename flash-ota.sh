@@ -32,7 +32,7 @@ set -uo pipefail
 # explicitly.
 
 # renovate: datasource=github-releases packageName=chenxiaolong/avbroot versioning=semver
-AVB_ROOT_VERSION=3.35.0
+AVB_ROOT_VERSION=3.37.0
 MIN_FASTBOOT_VERSION='35.0.1'
 CHENXIAOLONG_PK='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDOe6/tBnO7xZhAWXRj3ApUYgn+XZ0wnQiXM8B7tPgv4'
 AVB_PKMD='avb_pkmd.bin'
