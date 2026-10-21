@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static overlay for the GrapheneOS Updater: replaces only string/url (the
+     update server). Built by buildUpdaterOverlay in rooted-ota.sh, which adds
+     res/values/strings.xml. isStatic is what GrapheneOS' own /product/overlay
+     overlays use to be enabled without a config.xml. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="apatch.graphene.overlay.updater">
+    <overlay
+        android:targetPackage="app.seamlessupdate.client"
+        android:isStatic="true"
+        android:priority="1" />
+    <application android:hasCode="false" />
+</manifest>

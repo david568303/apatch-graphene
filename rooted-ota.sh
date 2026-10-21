@@ -93,6 +93,16 @@ KERNELPATCH_TOOLCHAIN_SHA256='62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f
 # this when unset), not just mustang.
 KERNELPATCH_FORK_COMMIT='280d32d967feb7ddc0fd1848aa1d1388807945d5'
 
+# Ship the APatch OTAs with a static overlay that points the on-device GrapheneOS
+# Updater at this repo's rolling release (UPDATER_FEED_TAG) instead of
+# releases.grapheneos.org, and publish each built OTA there for it to find. Off
+# by default: nothing is overlaid or published unless this is 'true'.
+# buildUpdaterOverlay needs aapt, aapt2, apksigner and openssl on the PATH plus
+# an android.jar (Debian/Ubuntu: aapt apksigner libandroid-23-java).
+UPDATER_FEED=${UPDATER_FEED:-'false'}
+UPDATER_FEED_TAG=${UPDATER_FEED_TAG:-'ota'}
+ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
+
 SKIP_CLEANUP=${SKIP_CLEANUP:-''}
 
 # For committing to GH pages in different repo, clone it to a different folder and set this var
@@ -175,6 +185,9 @@ function createAndReleaseRootedOta() {
 
   createRootedOta
   releaseOta
+  if [[ "$UPDATER_FEED" == 'true' && "${POTENTIAL_ASSETS['apatch']+isset}" ]]; then
+    publishUpdaterFeed
+  fi
 
   # APatch releases publish downloadable assets but deliberately do not update
   # the Custota OTA feed, so a new (possibly-not-yet-validated) APatch build is
@@ -712,43 +725,58 @@ function verifyAPatchOta() {
   printGreen "Verified APatch in final OTA boot image: $otaFile"
 }
 
-# Fails unless the patched OTA's system filesystem is identical to the stock
-# one apart from /system/etc/security/otacerts.zip. avbroot replaces that file
-# on purpose (it makes the on-device updater reject official GrapheneOS OTAs,
-# which a bootloader locked to our AVB key could not boot); anything else
-# differing means a module or patch is still writing into system.
-function verifyAPatchSystemUnmodified() {
+# Fails unless the patched OTA's filesystems are identical to the stock ones
+# apart from the intended changes: /system/etc/security/otacerts.zip, which
+# avbroot replaces on purpose (it makes the on-device updater reject official
+# GrapheneOS OTAs, which a bootloader locked to our AVB key could not boot), and,
+# with UPDATER_FEED, the one new /product/overlay/UpdaterOverlay.apk (which must
+# be the APK we built, over a stock Updater it can actually override). Anything
+# else differing means a module or patch is still writing where it should not.
+function verifyAPatchPartitions() {
   local otaFile="$1"
   local tools="$PWD/.tmp"
-  local dir=".tmp/apatch-system-${DEVICE_ID}-${OTA_VERSION}"
-  local name input
+  local dir=".tmp/apatch-partitions-${DEVICE_ID}-${OTA_VERSION}"
+  local partitions=(system) expected name input part
+
+  [[ "$UPDATER_FEED" == 'true' ]] && partitions+=(product)
 
   rm -rf "$dir"
   for name in stock patched; do
     input=".tmp/$OTA_TARGET.zip"
     [[ "$name" == 'patched' ]] && input="$otaFile"
-    mkdir -p "$dir/$name/unpacked"
-    "$tools/avbroot" ota extract --input "$input" --directory "$dir/$name" --partition system
-    (
-      cd "$dir/$name/unpacked"
-      "$tools/avbroot" avb unpack --quiet --input ../system.img
-      "$tools/afsr" unpack --input raw.img
-    )
-    rm -f "$dir/$name/system.img" "$dir/$name/unpacked/raw.img"
+    for part in "${partitions[@]}"; do
+      mkdir -p "$dir/$name/$part"
+      "$tools/avbroot" ota extract --input "$input" --directory "$dir/$name" --partition "$part"
+      (
+        cd "$dir/$name/$part"
+        "$tools/avbroot" avb unpack --quiet --input "../$part.img"
+        "$tools/afsr" unpack --input raw.img
+      )
+      rm -f "$dir/$name/$part.img" "$dir/$name/$part/raw.img"
+    done
   done
 
-  local differences
-  differences=$(diff -rq "$dir/stock/unpacked/fs_tree" "$dir/patched/unpacked/fs_tree" |
-    grep -v -F -x "Files $dir/stock/unpacked/fs_tree/system/etc/security/otacerts.zip and $dir/patched/unpacked/fs_tree/system/etc/security/otacerts.zip differ" ||
-    true)
+  expected=("Files $dir/stock/system/fs_tree/system/etc/security/otacerts.zip and $dir/patched/system/fs_tree/system/etc/security/otacerts.zip differ")
+  if [[ "$UPDATER_FEED" == 'true' ]]; then
+    expected+=("Only in $dir/patched/product/fs_tree/overlay: UpdaterOverlay.apk")
+    python3 -I updater-overlay/check_target.py "$dir/stock/system/fs_tree/system/priv-app/Updater/Updater.apk"
+    cmp "$dir/patched/product/fs_tree/overlay/UpdaterOverlay.apk" .tmp/updater-overlay.apk
+  fi
+
+  local differences=''
+  for part in "${partitions[@]}"; do
+    differences+=$(diff -rq "$dir/stock/$part/fs_tree" "$dir/patched/$part/fs_tree" || true)
+    differences+=$'\n'
+  done
+  differences=$(grep -v -F -x -f <(printf '%s\n' "${expected[@]}" '') <<<"$differences" || true)
   rm -rf "$dir"
 
   if [[ -n "$differences" ]]; then
-    printRed 'APatch OTA changes the system partition beyond otacerts.zip:'
+    printRed 'APatch OTA changes the partitions beyond what is intended:'
     echo "$differences"
     exit 1
   fi
-  printGreen "Verified system partition is stock apart from otacerts.zip: $otaFile"
+  printGreen "Verified ${partitions[*]} partitions are stock apart from the intended changes: $otaFile"
 }
 
 function downloadAvBroot() {
@@ -780,33 +808,95 @@ function downloadAndVerifyFromChenxiaolong() {
   fi
 }
 
-# Downloads the official signed APatch manager APK (verified by the SHA-256
-# digest GitHub publishes) and registers our system-app injection module into
-# the pinned my-avbroot-setup clone so patch.py can preinstall it. The clone is
-# pinned by PATCH_PY_COMMIT, so the all_modules() text is stable; registration
-# is grep-guarded to stay idempotent across re-runs.
-function installApatchManagerModule() {
-  resolveAPatchRelease
-  checkMandatoryVariable 'APATCH_MANAGER_URL' 'APATCH_MANAGER_SHA256'
-  downloadVerifiedFile '.tmp/apatch-manager.apk' "$APATCH_MANAGER_URL" "$APATCH_MANAGER_SHA256"
-
+# Copies one of our injection modules (patch-modules/<file>) into the pinned
+# my-avbroot-setup clone and registers it in all_modules() so patch.py can load
+# it. The clone is pinned by PATCH_PY_COMMIT, so the all_modules() text is
+# stable; registration is grep-guarded to stay idempotent across re-runs.
+function registerPatchModule() {
+  local file="$1" class="$2"
   local modulesDir='.tmp/my-avbroot-setup/lib/modules'
   if [[ ! -d "$modulesDir" ]]; then
     printRed "my-avbroot-setup modules dir not found at $modulesDir"
     exit 1
   fi
-  cp 'patch-modules/apatch_manager.py' "$modulesDir/apatch_manager.py"
-  if ! grep -q 'APatchManagerModule' "$modulesDir/__init__.py"; then
+  cp "patch-modules/$file" "$modulesDir/$file"
+  if ! grep -q "$class" "$modulesDir/__init__.py"; then
     sed -i \
-      -e '/from lib.modules.oemunlockonboot import OEMUnlockOnBootModule/a\    from lib.modules.apatch_manager import APatchManagerModule' \
-      -e '/^        OEMUnlockOnBootModule,$/a\        APatchManagerModule,' \
+      -e "/from lib.modules.oemunlockonboot import OEMUnlockOnBootModule/a\\    from lib.modules.${file%.py} import $class" \
+      -e "/^        OEMUnlockOnBootModule,\$/a\\        $class," \
       "$modulesDir/__init__.py"
-    if ! grep -q 'APatchManagerModule' "$modulesDir/__init__.py"; then
-      printRed 'Failed to register APatch manager module in my-avbroot-setup all_modules().'
+    if ! grep -q "$class" "$modulesDir/__init__.py"; then
+      printRed "Failed to register $class in my-avbroot-setup all_modules()."
       exit 1
     fi
   fi
+}
+
+# Downloads the official signed APatch manager APK (verified by the SHA-256
+# digest GitHub publishes) and registers our system-app injection module.
+function installApatchManagerModule() {
+  resolveAPatchRelease
+  checkMandatoryVariable 'APATCH_MANAGER_URL' 'APATCH_MANAGER_SHA256'
+  downloadVerifiedFile '.tmp/apatch-manager.apk' "$APATCH_MANAGER_URL" "$APATCH_MANAGER_SHA256"
+  registerPatchModule 'apatch_manager.py' 'APatchManagerModule'
   print "Preinstalling APatch manager $APATCH_VERSION into the OTA system image."
+}
+
+# Builds and signs the Updater overlay APK (updater-overlay/) whose only content
+# is string/url, set to this repo's rolling release (UPDATER_FEED_TAG). It is
+# signed with the OTA key so the signer is the same on every build; the OS does
+# not rely on that signature for a preinstalled overlay, but a package whose
+# signer changes between OTAs is avoided. Fails closed if the hidden isStatic
+# attribute or the URL did not make it into the APK.
+# Test builds (UPLOAD_TEST_OTA) get their own feed, so a device carrying a test
+# overlay never reads, and a test OTA never lands in, the regular feed.
+function updaterFeedTag() {
+  if [[ "$UPLOAD_TEST_OTA" == 'true' ]]; then echo "${UPDATER_FEED_TAG}-test"; else echo "$UPDATER_FEED_TAG"; fi
+}
+
+function buildUpdaterOverlay() {
+  checkMandatoryVariable 'GITHUB_REPO' 'UPDATER_FEED_TAG'
+  if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ || ! "$UPDATER_FEED_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    printRed "Refusing to build the Updater overlay for GITHUB_REPO='$GITHUB_REPO' UPDATER_FEED_TAG='$UPDATER_FEED_TAG'"
+    exit 1
+  fi
+  local tool
+  for tool in aapt aapt2 apksigner openssl; do
+    if ! command -v "$tool" >/dev/null; then
+      printRed "$tool is required to build the Updater overlay (Debian/Ubuntu: apt install aapt apksigner libandroid-23-java)"
+      exit 1
+    fi
+  done
+  if [[ ! -f "$ANDROID_JAR" ]]; then
+    printRed "android.jar not found at ANDROID_JAR=$ANDROID_JAR"
+    exit 1
+  fi
+
+  local dir='.tmp/updater-overlay' url
+  url="https://github.com/${GITHUB_REPO}/releases/download/$(updaterFeedTag)/"
+  rm -rf "$dir"
+  mkdir -p "$dir/res/values"
+  printf '<resources>\n    <string name="url" translatable="false">%s</string>\n</resources>\n' "$url" > "$dir/res/values/strings.xml"
+
+  aapt package -f -x -M updater-overlay/stub/AndroidManifest.xml -S updater-overlay/stub/res -I "$ANDROID_JAR" -F "$dir/stub.apk"
+  aapt2 compile --dir "$dir/res" -o "$dir/res.zip"
+  aapt2 link -o "$dir/unsigned.apk" --manifest updater-overlay/AndroidManifest.xml \
+    -I "$ANDROID_JAR" -I "$dir/stub.apk" --min-sdk-version 36 --target-sdk-version 37 "$dir/res.zip"
+
+  local passin=()
+  [[ -v PASSPHRASE_OTA ]] && passin=(-passin env:PASSPHRASE_OTA)
+  openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER "${passin[@]}" -in "$KEY_OTA" -out "$dir/key.pk8"
+  apksigner sign --v1-signing-enabled false --key "$dir/key.pk8" --cert "$CERT_OTA" \
+    --out ".tmp/updater-overlay.apk" "$dir/unsigned.apk"
+  rm -f "$dir/key.pk8"
+  apksigner verify ".tmp/updater-overlay.apk"
+
+  if ! aapt2 dump xmltree --file AndroidManifest.xml ".tmp/updater-overlay.apk" | grep -qF 'isStatic(0x0101055a)=true' ||
+    ! aapt2 dump resources ".tmp/updater-overlay.apk" | grep -qF "$url"; then
+    printRed 'The Updater overlay is missing isStatic or the update URL; not using it.'
+    exit 1
+  fi
+  printGreen "Built Updater overlay pointing the Updater at $url"
 }
 
 function patchOTAs() {
@@ -833,6 +923,10 @@ function patchOTAs() {
     if [[ "$APATCH_PREINSTALL_MANAGER" == 'true' ]]; then
       installApatchManagerModule
     fi
+    if [[ "$UPDATER_FEED" == 'true' ]]; then
+      buildUpdaterOverlay
+      registerPatchModule 'updater_overlay.py' 'UpdaterOverlayModule'
+    fi
   fi
 
   for flavor in "${!POTENTIAL_ASSETS[@]}"; do
@@ -854,6 +948,9 @@ function patchOTAs() {
         if [[ "$APATCH_PREINSTALL_MANAGER" == 'true' ]]; then
           args+=("--module-apatch-manager" ".tmp/apatch-manager.apk")
         fi
+        if [[ "$UPDATER_FEED" == 'true' ]]; then
+          args+=("--module-updater-overlay" ".tmp/updater-overlay.apk")
+        fi
       fi
 
       # If env vars not set, passphrases will be queried interactively
@@ -870,9 +967,9 @@ function patchOTAs() {
       fi
 
       # Custota and OEMUnlockOnBoot both write into the system partition. The
-      # APatch flavor ships without them (it is updated by sideloading the OTA,
-      # not through a Custota feed), so its system image stays stock apart from
-      # avbroot's own otacerts.zip replacement; verifyAPatchSystemUnmodified
+      # APatch flavor ships without them (it is updated through the Updater overlay
+      # or by sideloading, not a Custota feed), so its system image stays stock
+      # apart from avbroot's own otacerts.zip replacement; verifyAPatchPartitions
       # proves that after patching.
       if [[ "${SKIP_MODULES}" != 'true' && "$flavor" != 'apatch' ]]; then
         args+=("--module-custota" ".tmp/custota.zip")
@@ -899,7 +996,7 @@ function patchOTAs() {
 
       if [[ "$flavor" == 'apatch' ]]; then
         verifyAPatchOta "$targetFile"
-        verifyAPatchSystemUnmodified "$targetFile"
+        verifyAPatchPartitions "$targetFile"
       fi
 
       printGreen "Finished patching file ${targetFile}"
@@ -1066,12 +1163,13 @@ function uploadFileIfAbsent() {
   local sourceFileName="$1"
   local targetFileName="$2"
   local contentType="$3"
+  local releaseId="${4:-$RELEASE_ID}"
   local status
 
   status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: token $GITHUB_TOKEN" \
     -H "Content-Type: $contentType" \
     --upload-file "$sourceFileName" \
-    "https://uploads.github.com/repos/$GITHUB_REPO/releases/$RELEASE_ID/assets?name=$targetFileName")
+    "https://uploads.github.com/repos/$GITHUB_REPO/releases/$releaseId/assets?name=$targetFileName")
 
   case "$status" in
     201) printGreen "Uploaded $targetFileName" ;;
@@ -1081,6 +1179,82 @@ function uploadFileIfAbsent() {
       exit 1
       ;;
   esac
+}
+
+# Publishes the APatch OTA built for this device where the overlaid Updater
+# looks for it: the rolling release updaterFeedTag, in the Updater's own flat
+# layout (<device>-<channel> metadata line + <device>-ota_update-<incremental>.zip).
+# GitHub redirects release downloads to its CDN with Range support and answers
+# 404 for the incremental the Updater tries first, so it falls back to the full
+# OTA. Both channels are served so the default one and the security-preview opt-in
+# find it. The OTA zip goes up before the metadata that names it and stale zips
+# go last, so the feed never points at a missing file; an older build never
+# replaces a newer one. The metadata is unauthenticated, as upstream's is: the
+# Updater only installs zips signed with the otacerts avbroot embedded.
+function publishUpdaterFeed() {
+  checkMandatoryVariable 'GITHUB_REPO' 'GITHUB_TOKEN' 'DEVICE_ID'
+  local tag otaFile metadata incremental timestamp device id
+  tag=$(updaterFeedTag)
+  otaFile=".tmp/${POTENTIAL_ASSETS['apatch']}"
+  metadata=$(unzip -p "$otaFile" META-INF/com/android/metadata)
+  incremental=$(sed -n 's/^post-build-incremental=//p' <<<"$metadata")
+  timestamp=$(sed -n 's/^post-timestamp=//p' <<<"$metadata")
+  device=$(sed -n 's/^pre-device=//p' <<<"$metadata")
+  if [[ "$device" != "$DEVICE_ID" || "$incremental" != "$OTA_VERSION" || ! "$timestamp" =~ ^[0-9]+$ ]]; then
+    printRed "Unexpected OTA metadata for the Updater feed: device=$device incremental=$incremental timestamp=$timestamp"
+    exit 1
+  fi
+
+  local api="https://api.github.com/repos/$GITHUB_REPO" release feedId
+  release=$(githubApiGet "$api/releases/tags/$tag" 2>/dev/null) || {
+    curl -sL -X POST -H "Authorization: token $GITHUB_TOKEN" "$api/releases" -d "{
+      \"tag_name\": \"$tag\", \"target_commitish\": \"main\", \"name\": \"$tag\", \"prerelease\": true,
+      \"body\": \"Rolling feed read by the GrapheneOS Updater of OTAs built with the Updater overlay. Download OTAs from the versioned releases instead.\"
+    }" >/dev/null || true
+    # A concurrent device job may have created it first; either way it exists now.
+    release=$(githubApiGet "$api/releases/tags/$tag")
+  }
+  feedId=$(jq -er '.id' <<<"$release")
+
+  local assets name channel existing current=0
+  assets=$(githubApiGet "$api/releases/$feedId/assets?per_page=100")
+  if (( $(jq 'length' <<<"$assets") >= 100 )); then
+    printRed "The $tag release has too many assets to manage."
+    exit 1
+  fi
+
+  local metaName="$device-stable-security-preview"
+  existing=$(jq -r --arg n "$metaName" '[.[] | select(.name == $n) | .url] | first // empty' <<<"$assets")
+  if [[ -n "$existing" ]]; then
+    current=$(curl --fail -sL -H "Authorization: token $GITHUB_TOKEN" -H 'Accept: application/octet-stream' "$existing" | awk '{print $2; exit}')
+    if [[ "$current" =~ ^[0-9]+$ ]] && (( current > timestamp )); then
+      printGreen "The $tag feed already serves a newer $device build ($current > $timestamp), not replacing it."
+      return
+    fi
+  fi
+
+  local zipName="$device-ota_update-$incremental.zip"
+  replaceReleaseAsset "$api" "$feedId" "$assets" "$zipName" "$otaFile" 'application/zip'
+  for channel in stable stable-security-preview; do
+    printf '%s %s %s %s\n' "$incremental" "$timestamp" "$device" "$channel" > ".tmp/$device-$channel"
+    replaceReleaseAsset "$api" "$feedId" "$assets" "$device-$channel" ".tmp/$device-$channel" 'text/plain'
+  done
+
+  while read -r name id; do
+    [[ "$name" != "$zipName" ]] && curl --fail -sL -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$api/releases/assets/$id"
+  done < <(jq -r --arg p "$device-ota_update-" '.[] | select((.name | startswith($p)) and (.name | endswith(".zip"))) | "\(.name) \(.id)"' <<<"$assets")
+  printGreen "Updater feed $tag now serves $device $incremental."
+}
+
+# Uploads a file to a release, first deleting an asset of that name if the
+# given asset listing has one (GitHub cannot overwrite assets).
+function replaceReleaseAsset() {
+  local api="$1" releaseId="$2" assets="$3" name="$4" file="$5" contentType="$6" id
+  id=$(jq -r --arg n "$name" '[.[] | select(.name == $n) | .id] | first // empty' <<<"$assets")
+  if [[ -n "$id" ]]; then
+    curl --fail -sL -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$api/releases/assets/$id"
+  fi
+  uploadFileIfAbsent "$file" "$name" "$contentType" "$releaseId"
 }
 
 function createOtaServerData() {
