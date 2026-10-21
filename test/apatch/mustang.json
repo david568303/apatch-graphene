@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "full": {
+    "location_ota": "https://github.com/david568303/apatch-graphene/releases/download/2026101601/mustang-2026101601-fc68230-apatch-11224-kp0.13.9-g280d32d-test.zip",
+    "location_csig": "https://github.com/david568303/apatch-graphene/releases/download/2026101601/mustang-2026101601-fc68230-apatch-11224-kp0.13.9-g280d32d-test.zip.csig"
+  }
+}
