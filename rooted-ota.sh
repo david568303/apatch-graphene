@@ -1193,6 +1193,7 @@ function publishFeedExtras() {
   if [[ -n "$previous" && "$previous" != "$sha" ]]; then
     body+=$'\n\n'"**Full Changelog**: https://github.com/${GITHUB_REPO}/compare/${previous}...${sha}"
   fi
+  body+=$'\n\n'"**Installing:** install GrapheneOS first as described in the [README](https://github.com/${GITHUB_REPO}#installation), then put the zip of your device and \`flash-ota.sh\` (Linux/macOS) or \`flash-ota.bat\` (Windows) in one folder and run the script. Check a download against its \`.sha256\` file."
   body+=$'\n\n'"Every update replaces the files in this release, so it only holds the newest OTA of each device."
 
   jq -n --arg body "$body" '{body: $body}' |
