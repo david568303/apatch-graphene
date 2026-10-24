@@ -428,8 +428,24 @@ function githubAssetMetadata() {
     '{url: $url, sha256: $sha256}'
 }
 
+# Prints the KernelPatch version an APatch release pins. Older APatch tags
+# state it as a literal in build.gradle.kts; newer ones compute it from the
+# MAJOR/MINOR/PATCH defines in app/src/main/cpp/version. Fails loudly if neither
+# layout yields a version, instead of a silent exit from a failed grep.
+function apatchPinnedKernelPatchVersion() {
+  local raw="https://raw.githubusercontent.com/bmax121/APatch/$1" gradle header version
+  gradle=$(curl --fail --retry 3 -sL "$raw/build.gradle.kts")
+  version=$(sed -nE 's/.*project\.ext\.set\("kernelPatchVersion", "([A-Za-z0-9._+-]+)"\).*/\1/p' <<< "$gradle" | head -n1)
+  if [[ -z "$version" ]]; then
+    header=$(curl --fail --retry 3 -sL "$raw/app/src/main/cpp/version")
+    version=$(awk '$1 == "#define" && $2 ~ /^(MAJOR|MINOR|PATCH)$/ { v[$2] = $3 } END { if (v["MAJOR"] != "" && v["MINOR"] != "" && v["PATCH"] != "") print v["MAJOR"] "." v["MINOR"] "." v["PATCH"] }' <<< "$header")
+  fi
+  validateReleaseVersion "KernelPatch version pinned by APatch $1" "$version"
+  echo "$version"
+}
+
 function resolveAPatchRelease() {
-  local endpoint releaseJson managerJson source kernelPatchLine apatchKernelPatchVersion
+  local endpoint releaseJson managerJson
   local kernelReleaseJson='' kpimgJson kptoolsJson
 
   # Every device builds APatch's KernelPatch from this repo's fork (not the
@@ -470,14 +486,8 @@ function resolveAPatchRelease() {
     exit 1
   fi
 
-  source=$(curl --fail --retry 3 -sL \
-    "https://raw.githubusercontent.com/bmax121/APatch/$APATCH_VERSION/build.gradle.kts")
-  kernelPatchLine=$(grep -E 'project\.ext\.set\("kernelPatchVersion", "[A-Za-z0-9._+-]+"\)' <<< "$source" | head -n1)
-  apatchKernelPatchVersion=$(sed -E 's/.*"kernelPatchVersion", "([A-Za-z0-9._+-]+)".*/\1/' <<< "$kernelPatchLine")
-  validateReleaseVersion 'APATCH_KERNELPATCH_VERSION' "$apatchKernelPatchVersion"
-
   if [[ -z "$KERNELPATCH_VERSION" || "$KERNELPATCH_VERSION" == 'apatch' ]]; then
-    KERNELPATCH_VERSION="$apatchKernelPatchVersion"
+    KERNELPATCH_VERSION=$(apatchPinnedKernelPatchVersion "$APATCH_VERSION")
   elif [[ "$KERNELPATCH_VERSION" == 'latest' ]]; then
     kernelReleaseJson=$(githubApiGet \
       'https://api.github.com/repos/bmax121/KernelPatch/releases/latest')
