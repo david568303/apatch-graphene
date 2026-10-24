@@ -1,16 +1,19 @@
 name: Automatic APatch OTAs
 
-# Publishes APatch (KernelPatch) release assets for all devices as a GitHub
-# pre-release (its own `<version>-apatch` tag, so it shows in the releases
-# list but never becomes "Latest" and never touches the stable release). It
-# deliberately does NOT update the Custota OTA feed, so a new APatch build is
-# never auto-pushed to users as a seamless update — they opt in by
-# downloading and flashing (or sideloading, once already on a build from this
-# repo; see README).
+# Builds the APatch (KernelPatch) OTA of every device for each new GrapheneOS
+# version and publishes them as ONE normal GitHub release per version (tag =
+# the version, e.g. 2026102101). Every OTA carries an overlay that points the
+# on-device Updater at .../releases/latest/download/, so the release holds the
+# Updater's own layout per device (<device>-ota_update-<version>.zip plus one
+# metadata file per channel) and the phones update from it by themselves.
 #
-# A single cheap `detect` job decides which devices still need an APatch
-# build for the current release, so idle runs cost one job instead of one
-# per device.
+# A release is created as "not Latest" and only promoted by the `publish` job
+# once it holds every device, so an Updater never sees half a release. It does
+# NOT touch the Custota feed.
+#
+# A single cheap `detect` job decides which devices still need a build for the
+# current version, so idle runs cost one job instead of one per device. A run
+# after a failure builds only what is missing and then promotes the release.
 
 on:
   schedule:
@@ -24,6 +27,14 @@ concurrency:
   group: automatic-apatch-otas
   cancel-in-progress: false
 
+env:
+  DEVICES: >-
+    stallion rango mustang blazer frankel
+    tegu comet komodo caiman tokay
+    akita husky shiba felix tangorpro
+    lynx cheetah panther bluejay raven
+    oriole
+
 jobs:
   detect:
     runs-on: ubuntu-latest
@@ -33,25 +44,19 @@ jobs:
       any: ${{ steps.gate.outputs.any }}
     steps:
       - uses: actions/checkout@v7
-      - name: Decide which devices need an APatch build
+      - name: Decide which devices need a build
         id: gate
         env:
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          bash -c '. rooted-ota.sh && emitBuildMatrix apatch \
-            stallion rango mustang blazer frankel \
-            tegu comet komodo caiman tokay \
-            akita husky shiba felix tangorpro \
-            lynx cheetah panther bluejay raven \
-            oriole' >> "$GITHUB_OUTPUT"
+        run: bash -c ". rooted-ota.sh && emitBuildMatrix $DEVICES" >> "$GITHUB_OUTPUT"
 
   release:
     needs: detect
     if: needs.detect.outputs.any == 'true'
     strategy:
       fail-fast: false
-      # Limit simultaneous multi-gigabyte downloads and gh-pages pushes.
+      # Limit simultaneous multi-gigabyte downloads.
       max-parallel: 6
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
     uses: ./.github/workflows/release-single.yaml
@@ -60,9 +65,21 @@ jobs:
       device-id: ${{ matrix.device-id }}
       skip-rootless: true
       skip-apatch: false
-      # Own release, marked pre-release so it never becomes "Latest".
-      release-tag-suffix: '-apatch'
-      release-prerelease: true
-      # Assets only; do not auto-push APatch via the Custota seamless-update feed.
+      # Not the Custota feed: the Updater overlay is how phones get updates.
       allow-apatch-release: true
       skip-ota-server-upload: true
+
+  publish:
+    needs: [detect, release]
+    # Also runs when some devices failed or nothing needed building: it only
+    # promotes a release that is already complete, and every run retries.
+    if: ${{ !cancelled() && needs.detect.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Mark the newest release Latest once it holds every device
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash -c ". rooted-ota.sh && markReleaseLatestIfComplete $DEVICES"

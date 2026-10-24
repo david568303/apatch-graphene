@@ -93,14 +93,14 @@ KERNELPATCH_TOOLCHAIN_SHA256='62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f
 # this when unset), not just mustang.
 KERNELPATCH_FORK_COMMIT='280d32d967feb7ddc0fd1848aa1d1388807945d5'
 
-# Ship the APatch OTAs with a static overlay that points the on-device GrapheneOS
-# Updater at this repo's rolling release (UPDATER_FEED_TAG) instead of
-# releases.grapheneos.org, and publish each built OTA there for it to find. Off
-# by default: nothing is overlaid or published unless this is 'true'.
+# Every APatch OTA ships with a static overlay that points the on-device
+# GrapheneOS Updater at this repo's newest release (GitHub's
+# .../releases/latest/download/ address) instead of releases.grapheneos.org. So
+# each release holds the Updater's own layout per device: the OTA as
+# <device>-ota_update-<version>.zip plus one metadata file per channel, and it
+# only becomes "Latest" once markReleaseLatestIfComplete has seen every device.
 # buildUpdaterOverlay needs aapt, aapt2, apksigner and openssl on the PATH plus
 # an android.jar (Debian/Ubuntu: aapt apksigner libandroid-23-java).
-UPDATER_FEED=${UPDATER_FEED:-'false'}
-UPDATER_FEED_TAG=${UPDATER_FEED_TAG:-'ota'}
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 
 SKIP_CLEANUP=${SKIP_CLEANUP:-''}
@@ -185,9 +185,6 @@ function createAndReleaseRootedOta() {
 
   createRootedOta
   releaseOta
-  if [[ "$UPDATER_FEED" == 'true' && "${POTENTIAL_ASSETS['apatch']+isset}" ]]; then
-    publishUpdaterFeed
-  fi
 
   # APatch releases publish downloadable assets but deliberately do not update
   # the Custota OTA feed, so a new (possibly-not-yet-validated) APatch build is
@@ -223,8 +220,9 @@ function checkBuildNecessary() {
     
   if [[ "$SKIP_APATCH" != 'true' ]]; then
     resolveAPatchRelease
-    # e.g. mustang-2026092501-4647f74-apatch-11224-kp0.13.3-test.zip
-    POTENTIAL_ASSETS['apatch']="${DEVICE_ID}-${OTA_VERSION}-${currentCommit}-apatch-${APATCH_VERSION}-kp${KERNELPATCH_DISPLAY_VERSION}$(createAssetSuffix).zip"
+    # The name is fixed by the Updater (see buildUpdaterOverlay), e.g.
+    # mustang-ota_update-2026092501.zip; the build details go in the release notes.
+    POTENTIAL_ASSETS['apatch']="${DEVICE_ID}-ota_update-${OTA_VERSION}.zip"
   else
     printGreen "SKIP_APATCH set, not creating APatch OTA"
   fi
@@ -236,55 +234,65 @@ function checkBuildNecessary() {
   fi
 
   RELEASE_ID=''
-  local response
-
   if [[ -z "$GITHUB_REPO" ]]; then print "Env Var GITHUB_REPO not set, skipping check for existing release" && return; fi
 
-  local releaseTag="${OTA_VERSION}${RELEASE_TAG_SUFFIX}"
+  local releaseTag="${OTA_VERSION}${RELEASE_TAG_SUFFIX}" response names
   print "Potential release: ${releaseTag}"
 
-  local params=()
-  local url="https://api.github.com/repos/${GITHUB_REPO}/releases"
-
+  local params=("-H" "Accept: application/vnd.github.v3+json")
   if [ -n "${GITHUB_TOKEN}" ]; then
     params+=("-H" "Authorization: token ${GITHUB_TOKEN}")
   fi
+  response=$(curl --fail -sL "${params[@]}" "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${releaseTag}" || true)
 
-  params+=("-H" "Accept: application/vnd.github.v3+json")
-  response=$(
-    curl --fail -sL "${params[@]}" "${url}" |
-      jq --arg release_tag "${releaseTag}" '.[] | select(.tag_name == $release_tag) | {id, tag_name, name, published_at, assets}'
-  )
-
-  if [[ -n ${response} ]]; then
-    RELEASE_ID=$(echo "${response}" | jq -r '.id')
-    print "Release ${releaseTag} exists. ID=$RELEASE_ID"
-    
-    for flavor in "${!POTENTIAL_ASSETS[@]}"; do
-      local selectedAsset POTENTIAL_ASSET_NAME="${POTENTIAL_ASSETS[$flavor]}"
-      print "Checking if asset exists ${POTENTIAL_ASSET_NAME}"
-      
-      # Save some storage by not building and uploading every new commit as asset
-      selectedAsset=$(echo "${response}" | jq -r --arg assetPrefix "${DEVICE_ID}-${OTA_VERSION}" \
-        '.assets[] | select(.name | startswith($assetPrefix)) | .name' \
-          | grep "${flavor}" || true)
-  
-      if [[ -n "${selectedAsset}" ]] && [[ "$FORCE_BUILD" != 'true' ]] && [[ "$UPLOAD_TEST_OTA" != 'true' ]]; then
-        printGreen "Skipping build of asset name '$POTENTIAL_ASSET_NAME'. Because this flavor already is released with a different commit." \
-          "Set FORCE_BUILD or UPLOAD_TEST_OTA to force. Assets found on release: ${selectedAsset//$'\n'/ }"
-        unset "POTENTIAL_ASSETS[$flavor]"
-      else
-        print "No asset found with name '$POTENTIAL_ASSET_NAME'."
-      fi
-    done
-    
-    if [ "${#POTENTIAL_ASSETS[@]}" -eq 0 ]; then
-      printGreen "All potential assets already exist. Exiting"
-      exit 0
-    fi
-  else
+  if [[ -z ${response} ]]; then
     print "Release ${OTA_VERSION} does not exist."
+    return
   fi
+
+  RELEASE_ID=$(jq -r '.id' <<< "${response}")
+  print "Release ${releaseTag} exists. ID=$RELEASE_ID"
+  names=$(releaseAssetNames "$RELEASE_ID")
+
+  for flavor in "${!POTENTIAL_ASSETS[@]}"; do
+    local selectedAsset POTENTIAL_ASSET_NAME="${POTENTIAL_ASSETS[$flavor]}"
+    print "Checking if asset exists ${POTENTIAL_ASSET_NAME}"
+
+    if [[ "$flavor" == 'apatch' ]]; then
+      # The name is fixed (no commit in it), and the checksum is uploaded last,
+      # so only a finished upload counts as released.
+      selectedAsset=$(grep -Fx "${POTENTIAL_ASSET_NAME}.sha256" <<< "${names}" || true)
+    else
+      # Save some storage by not building and uploading every new commit as asset
+      selectedAsset=$(grep "^${DEVICE_ID}-${OTA_VERSION}-" <<< "${names}" | grep "${flavor}" || true)
+    fi
+
+    if [[ -n "${selectedAsset}" ]] && [[ "$FORCE_BUILD" != 'true' ]] && [[ "$UPLOAD_TEST_OTA" != 'true' ]]; then
+      printGreen "Skipping build of asset name '$POTENTIAL_ASSET_NAME'. Because this flavor already is released." \
+        "Set FORCE_BUILD or UPLOAD_TEST_OTA to force. Assets found on release: ${selectedAsset//$'\n'/ }"
+      unset "POTENTIAL_ASSETS[$flavor]"
+    else
+      print "No asset found with name '$POTENTIAL_ASSET_NAME'."
+    fi
+  done
+
+  if [ "${#POTENTIAL_ASSETS[@]}" -eq 0 ]; then
+    printGreen "All potential assets already exist. Exiting"
+    exit 0
+  fi
+}
+
+# Prints the names of the finished assets of a release, one per line. A release
+# holds eight assets per device, more than one page of the API.
+function releaseAssetNames() {
+  local url="https://api.github.com/repos/${GITHUB_REPO}/releases/$1/assets" page batch
+  for page in {1..10}; do
+    batch=$(githubApiGet "${url}?per_page=100&page=${page}")
+    jq -r '.[] | select(.state == "uploaded") | .name' <<< "$batch"
+    if (( $(jq 'length' <<< "$batch") < 100 )); then return 0; fi
+  done
+  printRed "Release $1 has too many assets to read."
+  return 1
 }
 
 function checkMandatoryVariable() {
@@ -308,23 +316,25 @@ function checkMandatoryVariable() {
 # an over-inclusive matrix just early-exits cheaply. If every lookup fails, every
 # device is included and behaviour matches the pre-gate workflow.
 #
-# Usage: emitBuildMatrix <flavorKeyword> <device> [<device> ...]
+# Usage: emitBuildMatrix <device> [<device> ...]
 function emitBuildMatrix() {
-  local flavor="$1"; shift
-  local releases params=(-H "Accept: application/vnd.github.v3+json")
+  local params=(-H "Accept: application/vnd.github.v3+json")
   [[ -n "${GITHUB_TOKEN:-}" ]] && params+=(-H "Authorization: token ${GITHUB_TOKEN}")
-  releases=$(curl --fail -sL "${params[@]}" "https://api.github.com/repos/${GITHUB_REPO}/releases" 2>/dev/null) || releases=''
 
-  local include=() dev ver assets
+  local include=() dev ver release
+  declare -A assetNames
   for dev in "$@"; do
     ver=$(curl --fail -sL "$OTA_BASE_URL/$dev-$OTA_CHANNEL" 2>/dev/null | head -n1 | awk '{print $1}') || ver=''
-    if [[ -n "$ver" && -n "$releases" ]]; then
-      # Search assets across all releases so a flavor in its own release tag
-      # (e.g. APatch's pre-release) is still detected. The asset name carries
-      # the device, version and flavor, so it is matched directly.
-      assets=$(jq -r '.[].assets[].name' <<<"$releases" 2>/dev/null) || assets=''
-      # Already built for this version/flavor -> skip it.
-      if grep -q -E "^${dev}-${ver}-.*${flavor}" <<<"$assets"; then
+    if [[ -n "$ver" ]]; then
+      # Every device is on the same release, so read its assets once per version.
+      if [[ -z "${assetNames[$ver]+set}" ]]; then
+        release=$(curl --fail -sL "${params[@]}" "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${ver}" 2>/dev/null) || release=''
+        assetNames[$ver]=''
+        [[ -n "$release" ]] && assetNames[$ver]=$(releaseAssetNames "$(jq -r '.id' <<<"$release")" 2>/dev/null)
+      fi
+      # Already built for this version -> skip it. The checksum is the last
+      # thing uploaded, so only a finished upload counts.
+      if grep -qFx "${dev}-ota_update-${ver}.zip.sha256" <<<"${assetNames[$ver]}"; then
         continue
       fi
     fi
@@ -739,16 +749,14 @@ function verifyAPatchOta() {
 # apart from the intended changes: /system/etc/security/otacerts.zip, which
 # avbroot replaces on purpose (it makes the on-device updater reject official
 # GrapheneOS OTAs, which a bootloader locked to our AVB key could not boot), and,
-# with UPDATER_FEED, the one new /product/overlay/UpdaterOverlay.apk (which must
+# the one new /product/overlay/UpdaterOverlay.apk (which must
 # be the APK we built, over a stock Updater it can actually override). Anything
 # else differing means a module or patch is still writing where it should not.
 function verifyAPatchPartitions() {
   local otaFile="$1"
   local tools="$PWD/.tmp"
   local dir=".tmp/apatch-partitions-${DEVICE_ID}-${OTA_VERSION}"
-  local partitions=(system) expected name input part
-
-  [[ "$UPDATER_FEED" == 'true' ]] && partitions+=(product)
+  local partitions=(system product) expected name input part
 
   rm -rf "$dir"
   for name in stock patched; do
@@ -766,12 +774,10 @@ function verifyAPatchPartitions() {
     done
   done
 
-  expected=("Files $dir/stock/system/fs_tree/system/etc/security/otacerts.zip and $dir/patched/system/fs_tree/system/etc/security/otacerts.zip differ")
-  if [[ "$UPDATER_FEED" == 'true' ]]; then
-    expected+=("Only in $dir/patched/product/fs_tree/overlay: UpdaterOverlay.apk")
-    python3 -I updater-overlay/check_target.py "$dir/stock/system/fs_tree/system/priv-app/Updater/Updater.apk"
-    cmp "$dir/patched/product/fs_tree/overlay/UpdaterOverlay.apk" .tmp/updater-overlay.apk
-  fi
+  expected=("Files $dir/stock/system/fs_tree/system/etc/security/otacerts.zip and $dir/patched/system/fs_tree/system/etc/security/otacerts.zip differ"
+    "Only in $dir/patched/product/fs_tree/overlay: UpdaterOverlay.apk")
+  python3 -I updater-overlay/check_target.py "$dir/stock/system/fs_tree/system/priv-app/Updater/Updater.apk"
+  cmp "$dir/patched/product/fs_tree/overlay/UpdaterOverlay.apk" .tmp/updater-overlay.apk
 
   local differences=''
   for part in "${partitions[@]}"; do
@@ -853,21 +859,15 @@ function installApatchManagerModule() {
 }
 
 # Builds and signs the Updater overlay APK (updater-overlay/) whose only content
-# is string/url, set to this repo's rolling release (UPDATER_FEED_TAG). It is
+# is string/url, set to this repo's newest release (see above). It is
 # signed with the OTA key so the signer is the same on every build; the OS does
 # not rely on that signature for a preinstalled overlay, but a package whose
 # signer changes between OTAs is avoided. Fails closed if the hidden isStatic
 # attribute or the URL did not make it into the APK.
-# Test builds (UPLOAD_TEST_OTA) get their own feed, so a device carrying a test
-# overlay never reads, and a test OTA never lands in, the regular feed.
-function updaterFeedTag() {
-  if [[ "$UPLOAD_TEST_OTA" == 'true' ]]; then echo "${UPDATER_FEED_TAG}-test"; else echo "$UPDATER_FEED_TAG"; fi
-}
-
 function buildUpdaterOverlay() {
-  checkMandatoryVariable 'GITHUB_REPO' 'UPDATER_FEED_TAG'
-  if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ || ! "$UPDATER_FEED_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    printRed "Refusing to build the Updater overlay for GITHUB_REPO='$GITHUB_REPO' UPDATER_FEED_TAG='$UPDATER_FEED_TAG'"
+  checkMandatoryVariable 'GITHUB_REPO'
+  if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    printRed "Refusing to build the Updater overlay for GITHUB_REPO='$GITHUB_REPO'"
     exit 1
   fi
   local tool
@@ -883,7 +883,7 @@ function buildUpdaterOverlay() {
   fi
 
   local dir='.tmp/updater-overlay' url
-  url="https://github.com/${GITHUB_REPO}/releases/download/$(updaterFeedTag)/"
+  url="https://github.com/${GITHUB_REPO}/releases/latest/download/"
   rm -rf "$dir"
   mkdir -p "$dir/res/values"
   printf '<resources>\n    <string name="url" translatable="false">%s</string>\n</resources>\n' "$url" > "$dir/res/values/strings.xml"
@@ -933,10 +933,8 @@ function patchOTAs() {
     if [[ "$APATCH_PREINSTALL_MANAGER" == 'true' ]]; then
       installApatchManagerModule
     fi
-    if [[ "$UPDATER_FEED" == 'true' ]]; then
-      buildUpdaterOverlay
-      registerPatchModule 'updater_overlay.py' 'UpdaterOverlayModule'
-    fi
+    buildUpdaterOverlay
+    registerPatchModule 'updater_overlay.py' 'UpdaterOverlayModule'
   fi
 
   for flavor in "${!POTENTIAL_ASSETS[@]}"; do
@@ -958,9 +956,7 @@ function patchOTAs() {
         if [[ "$APATCH_PREINSTALL_MANAGER" == 'true' ]]; then
           args+=("--module-apatch-manager" ".tmp/apatch-manager.apk")
         fi
-        if [[ "$UPDATER_FEED" == 'true' ]]; then
-          args+=("--module-updater-overlay" ".tmp/updater-overlay.apk")
-        fi
+        args+=("--module-updater-overlay" ".tmp/updater-overlay.apk")
       fi
 
       # If env vars not set, passphrases will be queried interactively
@@ -1041,14 +1037,88 @@ function releaseOta() {
 
   for flavor in "${!POTENTIAL_ASSETS[@]}"; do
     local assetName="${POTENTIAL_ASSETS[$flavor]}"
-    uploadFile ".tmp/$assetName" "$assetName" "application/zip"
-    # Checksum in sha256sum format ("<hash>  <name>"), uploaded only after the
-    # OTA itself, so it never refers to a file that is not on the release.
+    uploadFileIfAbsent ".tmp/$assetName" "$assetName" "application/zip"
+    if [[ "$flavor" == 'apatch' ]]; then
+      uploadUpdaterMetadata ".tmp/$assetName"
+    fi
+    # Checksum in sha256sum format ("<hash>  <name>"). It goes up last: for
+    # APatch it also marks this device's upload as finished.
     (cd .tmp && sha256sum "$assetName" > "$assetName.sha256")
-    uploadFile ".tmp/$assetName.sha256" "$assetName.sha256" "text/plain"
+    uploadFileIfAbsent ".tmp/$assetName.sha256" "$assetName.sha256" "text/plain"
   done
 
   uploadInstallerAssets
+}
+
+# Uploads the metadata the Updater reads next to the OTA: one line,
+# "<incremental> <build timestamp> <device> <channel>", named <device>-<channel>.
+# The Updater asks for exactly one of stable, beta or alpha, each with or
+# without -security-preview, and insists the channel in the file is the one it
+# asked for, so each name gets its own file; all of them serve this build.
+function uploadUpdaterMetadata() {
+  local otaFile="$1" metadata incremental timestamp device channel
+  metadata=$(unzip -p "$otaFile" META-INF/com/android/metadata)
+  incremental=$(sed -n 's/^post-build-incremental=//p' <<<"$metadata")
+  timestamp=$(sed -n 's/^post-timestamp=//p' <<<"$metadata")
+  device=$(sed -n 's/^pre-device=//p' <<<"$metadata")
+  if [[ "$device" != "$DEVICE_ID" || "$incremental" != "$OTA_VERSION" || ! "$timestamp" =~ ^[0-9]+$ ]]; then
+    printRed "Unexpected OTA metadata for the Updater: device=$device incremental=$incremental timestamp=$timestamp"
+    exit 1
+  fi
+
+  for channel in {stable,beta,alpha}{,-security-preview}; do
+    printf '%s %s %s %s\n' "$incremental" "$timestamp" "$device" "$channel" > ".tmp/$device-$channel"
+    uploadFileIfAbsent ".tmp/$device-$channel" "$device-$channel" 'text/plain'
+  done
+}
+
+# Marks the release of the newest GrapheneOS version as "Latest", which is what
+# the Updater's address (.../releases/latest/download/) resolves to, once it
+# holds every one of the given devices that is on that version. Until then the
+# previous release stays Latest, so an Updater never sees half a release. Safe
+# to run any number of times; an incomplete release is retried by the next run.
+#
+# Usage: markReleaseLatestIfComplete <device> [<device> ...]
+function markReleaseLatestIfComplete() {
+  checkMandatoryVariable 'GITHUB_REPO' 'GITHUB_TOKEN'
+  local api="https://api.github.com/repos/${GITHUB_REPO}" dev ver newest=0 release id names
+  local missing=()
+  declare -A deviceVersion
+
+  for dev in "$@"; do
+    ver=$(curl --fail -sL "$OTA_BASE_URL/$dev-$OTA_CHANNEL" | head -n1 | awk '{print $1}') || ver=''
+    if [[ ! "$ver" =~ ^[0-9]+$ ]]; then
+      printRed "Cannot tell the current GrapheneOS version of $dev, leaving Latest as it is."
+      return 1
+    fi
+    deviceVersion[$dev]=$ver
+    if (( ver > newest )); then newest=$ver; fi
+  done
+
+  release=$(githubApiGet "$api/releases/tags/$newest" 2>/dev/null) || release=''
+  if [[ -z "$release" ]]; then
+    print "No release for $newest yet, nothing to mark as Latest."
+    return 0
+  fi
+  id=$(jq -r '.id' <<<"$release")
+  names=$(releaseAssetNames "$id")
+
+  for dev in "$@"; do
+    if [[ "${deviceVersion[$dev]}" == "$newest" ]] && ! grep -qFx "${dev}-ota_update-${newest}.zip.sha256" <<<"$names"; then
+      missing+=("$dev")
+    fi
+  done
+  if (( ${#missing[@]} > 0 )); then
+    printRed "Release $newest is not complete, still missing: ${missing[*]}. Not marking it Latest."
+    return 0
+  fi
+  if [[ "$(jq -r '.prerelease' <<<"$release")" != 'false' ]]; then
+    printRed "Release $newest is a pre-release and cannot be Latest."
+    return 1
+  fi
+
+  curl --fail -sL -X PATCH -H "Authorization: token $GITHUB_TOKEN" "$api/releases/$id" -d '{"make_latest": "true"}' >/dev/null
+  printGreen "Release $newest holds every device and is now Latest."
 }
 
 # Attaches the flash-ota installer (flash-ota.sh, flash-ota.bat) and this
@@ -1124,13 +1194,19 @@ function createReleaseIfNecessary() {
       changelog="Update to [GrapheneOS ${OTA_VERSION}](https://grapheneos.org/releases#${OTA_VERSION_ANCHOR}).\n\nRelease created using ${src_repo}@${current_commit}. See [Changelog](https://github.com/${src_repo}/blob/${current_commit}/README.md#notable-changelog)."
     fi
 
+    # The file names are fixed by the Updater, so the build details live here.
+    if [[ "${POTENTIAL_ASSETS['apatch']+isset}" ]]; then
+      changelog+="\n\nAPatch ${APATCH_VERSION}, KernelPatch ${KERNELPATCH_DISPLAY_VERSION}, built from ${src_repo}@$(git rev-parse --short HEAD)."
+    fi
+
     response=$(curl -sL -X POST -H "Authorization: token $GITHUB_TOKEN" \
       -d "{
               \"tag_name\": \"$releaseTag\",
               \"target_commitish\": \"main\",
               \"name\": \"$releaseTag\",
               \"body\": \"${changelog}\",
-              \"prerelease\": ${RELEASE_PRERELEASE}
+              \"prerelease\": ${RELEASE_PRERELEASE},
+              \"make_latest\": \"false\"
             }" \
       "https://api.github.com/repos/$GITHUB_REPO/releases")
     RELEASE_ID=$(echo "${response}" | jq -r '.id // empty')
@@ -1193,91 +1269,6 @@ function uploadFileIfAbsent() {
       exit 1
       ;;
   esac
-}
-
-# Publishes the APatch OTA built for this device where the overlaid Updater
-# looks for it: the rolling release updaterFeedTag, in the Updater's own flat
-# layout (<device>-<channel> metadata line + <device>-ota_update-<incremental>.zip).
-# GitHub redirects release downloads to its CDN with Range support and answers
-# 404 for the incremental the Updater tries first, so it falls back to the full
-# OTA. Both channels are served so the default one and the security-preview opt-in
-# find it. The OTA zip goes up before the metadata that names it and stale zips
-# go last, so the feed never points at a missing file; an older build never
-# replaces a newer one. The metadata is unauthenticated, as upstream's is: the
-# Updater only installs zips signed with the otacerts avbroot embedded.
-function publishUpdaterFeed() {
-  checkMandatoryVariable 'GITHUB_REPO' 'GITHUB_TOKEN' 'DEVICE_ID'
-  local tag otaFile metadata incremental timestamp device id
-  tag=$(updaterFeedTag)
-  otaFile=".tmp/${POTENTIAL_ASSETS['apatch']}"
-  metadata=$(unzip -p "$otaFile" META-INF/com/android/metadata)
-  incremental=$(sed -n 's/^post-build-incremental=//p' <<<"$metadata")
-  timestamp=$(sed -n 's/^post-timestamp=//p' <<<"$metadata")
-  device=$(sed -n 's/^pre-device=//p' <<<"$metadata")
-  if [[ "$device" != "$DEVICE_ID" || "$incremental" != "$OTA_VERSION" || ! "$timestamp" =~ ^[0-9]+$ ]]; then
-    printRed "Unexpected OTA metadata for the Updater feed: device=$device incremental=$incremental timestamp=$timestamp"
-    exit 1
-  fi
-
-  local api="https://api.github.com/repos/$GITHUB_REPO" release feedId
-  release=$(githubApiGet "$api/releases/tags/$tag" 2>/dev/null) || {
-    curl -sL -X POST -H "Authorization: token $GITHUB_TOKEN" "$api/releases" -d "{
-      \"tag_name\": \"$tag\", \"target_commitish\": \"main\", \"name\": \"$tag\", \"prerelease\": true,
-      \"body\": \"Rolling feed read by the GrapheneOS Updater of OTAs built with the Updater overlay. Download OTAs from the versioned releases instead.\"
-    }" >/dev/null || true
-    # A concurrent device job may have created it first; either way it exists now.
-    release=$(githubApiGet "$api/releases/tags/$tag")
-  }
-  feedId=$(jq -er '.id' <<<"$release")
-
-  # Seven assets per device (the OTA plus one metadata file per channel), so
-  # the feed outgrows a single API page; read them all.
-  local assets='[]' name channel existing current=0 page batch
-  for page in {1..10}; do
-    batch=$(githubApiGet "$api/releases/$feedId/assets?per_page=100&page=$page")
-    assets=$(jq -c --argjson more "$batch" '. + $more' <<<"$assets")
-    (( $(jq 'length' <<<"$batch") < 100 )) && break
-    if (( page == 10 )); then
-      printRed "The $tag release has too many assets to manage."
-      exit 1
-    fi
-  done
-
-  local metaName="$device-stable-security-preview"
-  existing=$(jq -r --arg n "$metaName" '[.[] | select(.name == $n) | .url] | first // empty' <<<"$assets")
-  if [[ -n "$existing" ]]; then
-    current=$(curl --fail -sL -H "Authorization: token $GITHUB_TOKEN" -H 'Accept: application/octet-stream' "$existing" | awk '{print $2; exit}')
-    if [[ "$current" =~ ^[0-9]+$ ]] && (( current > timestamp )); then
-      printGreen "The $tag feed already serves a newer $device build ($current > $timestamp), not replacing it."
-      return
-    fi
-  fi
-
-  local zipName="$device-ota_update-$incremental.zip"
-  replaceReleaseAsset "$api" "$feedId" "$assets" "$zipName" "$otaFile" 'application/zip'
-  # The Updater asks for one of six names: stable, beta or alpha, with or without
-  # -security-preview. It insists the channel in the file matches the one it
-  # asked for, so each gets its own file. Every channel serves this one build.
-  for channel in {stable,beta,alpha}{,-security-preview}; do
-    printf '%s %s %s %s\n' "$incremental" "$timestamp" "$device" "$channel" > ".tmp/$device-$channel"
-    replaceReleaseAsset "$api" "$feedId" "$assets" "$device-$channel" ".tmp/$device-$channel" 'text/plain'
-  done
-
-  while read -r name id; do
-    [[ "$name" != "$zipName" ]] && curl --fail -sL -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$api/releases/assets/$id"
-  done < <(jq -r --arg p "$device-ota_update-" '.[] | select((.name | startswith($p)) and (.name | endswith(".zip"))) | "\(.name) \(.id)"' <<<"$assets")
-  printGreen "Updater feed $tag now serves $device $incremental."
-}
-
-# Uploads a file to a release, first deleting an asset of that name if the
-# given asset listing has one (GitHub cannot overwrite assets).
-function replaceReleaseAsset() {
-  local api="$1" releaseId="$2" assets="$3" name="$4" file="$5" contentType="$6" id
-  id=$(jq -r --arg n "$name" '[.[] | select(.name == $n) | .id] | first // empty' <<<"$assets")
-  if [[ -n "$id" ]]; then
-    curl --fail -sL -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$api/releases/assets/$id"
-  fi
-  uploadFileIfAbsent "$file" "$name" "$contentType" "$releaseId"
 }
 
 function createOtaServerData() {

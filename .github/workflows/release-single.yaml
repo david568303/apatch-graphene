@@ -61,10 +61,6 @@ on:
         description: mark the GitHub release as a pre-release
         type: boolean
         default: false
-      updater-feed:
-        description: ship the APatch OTA with the Updater overlay and publish it to the rolling updater feed
-        type: boolean
-        default: false
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -124,10 +120,6 @@ on:
         description: mark the GitHub release as a pre-release
         type: boolean
         required: false
-      updater-feed:
-        description: ship the APatch OTA with the Updater overlay and publish it to the rolling updater feed
-        type: boolean
-        required: false
 
 permissions:
   contents: write
@@ -159,7 +151,6 @@ jobs:
           SKIP_OTA_SERVER_UPLOAD_INPUT: ${{ toJSON(inputs.skip-ota-server-upload) == 'true' && 'true' || 'false' }}
           RELEASE_TAG_SUFFIX_INPUT: ${{ inputs.release-tag-suffix || '' }}
           RELEASE_PRERELEASE_INPUT: ${{ toJSON(inputs.release-prerelease) == 'true' && 'true' || 'false' }}
-          UPDATER_FEED_INPUT: ${{ toJSON(inputs.updater-feed) == 'true' && 'true' || 'false' }}
         run: |
           {
             echo "DEVICE_ID=$(echo "$DEVICE_ID_INPUT" | xargs)"
@@ -177,7 +168,6 @@ jobs:
             echo "SKIP_OTA_SERVER_UPLOAD=$SKIP_OTA_SERVER_UPLOAD_INPUT"
             echo "RELEASE_TAG_SUFFIX=$(echo "$RELEASE_TAG_SUFFIX_INPUT" | xargs)"
             echo "RELEASE_PRERELEASE=$RELEASE_PRERELEASE_INPUT"
-            echo "UPDATER_FEED=$UPDATER_FEED_INPUT"
           } >> "$GITHUB_ENV"
       - name: Validate signing secrets
         env:
@@ -198,7 +188,6 @@ jobs:
             exit 1
           fi
       - name: Install Updater overlay build tools
-        if: ${{ inputs.updater-feed }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends aapt apksigner libandroid-23-java
