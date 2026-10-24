@@ -199,7 +199,9 @@ jobs:
           fi
       - name: Install Updater overlay build tools
         if: ${{ inputs.updater-feed }}
-        run: sudo apt-get install -y --no-install-recommends aapt apksigner libandroid-23-java
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends aapt apksigner libandroid-23-java
       # jq, curl and git are preinstalled on ubuntu-latest; no apt step needed.
       - name: release
         env:
