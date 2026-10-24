@@ -1230,12 +1230,18 @@ function publishUpdaterFeed() {
   }
   feedId=$(jq -er '.id' <<<"$release")
 
-  local assets name channel existing current=0
-  assets=$(githubApiGet "$api/releases/$feedId/assets?per_page=100")
-  if (( $(jq 'length' <<<"$assets") >= 100 )); then
-    printRed "The $tag release has too many assets to manage."
-    exit 1
-  fi
+  # Seven assets per device (the OTA plus one metadata file per channel), so
+  # the feed outgrows a single API page; read them all.
+  local assets='[]' name channel existing current=0 page batch
+  for page in {1..10}; do
+    batch=$(githubApiGet "$api/releases/$feedId/assets?per_page=100&page=$page")
+    assets=$(jq -c --argjson more "$batch" '. + $more' <<<"$assets")
+    (( $(jq 'length' <<<"$batch") < 100 )) && break
+    if (( page == 10 )); then
+      printRed "The $tag release has too many assets to manage."
+      exit 1
+    fi
+  done
 
   local metaName="$device-stable-security-preview"
   existing=$(jq -r --arg n "$metaName" '[.[] | select(.name == $n) | .url] | first // empty' <<<"$assets")
@@ -1249,7 +1255,10 @@ function publishUpdaterFeed() {
 
   local zipName="$device-ota_update-$incremental.zip"
   replaceReleaseAsset "$api" "$feedId" "$assets" "$zipName" "$otaFile" 'application/zip'
-  for channel in stable stable-security-preview; do
+  # The Updater asks for one of six names: stable, beta or alpha, with or without
+  # -security-preview. It insists the channel in the file matches the one it
+  # asked for, so each gets its own file. Every channel serves this one build.
+  for channel in {stable,beta,alpha}{,-security-preview}; do
     printf '%s %s %s %s\n' "$incremental" "$timestamp" "$device" "$channel" > ".tmp/$device-$channel"
     replaceReleaseAsset "$api" "$feedId" "$assets" "$device-$channel" ".tmp/$device-$channel" 'text/plain'
   done
