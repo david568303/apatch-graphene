@@ -1,8 +1,8 @@
 name: Delete releases
 
 # Removes obsolete releases (and their git tags) in one go. Needs the word
-# DELETE as confirmation, and never touches the release currently marked Latest,
-# the one phones update from.
+# DELETE as confirmation, and does not touch the release currently marked Latest
+# unless allow-latest is set.
 
 on:
   workflow_dispatch:
@@ -13,6 +13,10 @@ on:
       confirm:
         description: Type DELETE to confirm
         required: true
+      allow-latest:
+        description: Also allow deleting the release currently marked Latest
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -27,18 +31,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAGS: ${{ inputs.tags }}
           CONFIRM: ${{ inputs.confirm }}
+          ALLOW_LATEST: ${{ inputs.allow-latest }}
         run: |
           if [[ "$CONFIRM" != 'DELETE' ]]; then
             echo "Not confirmed: type DELETE in the confirm field." >&2
             exit 1
           fi
-          latest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          latest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName || true)
           for tag in $TAGS; do
             if [[ ! "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
               echo "Refusing the odd-looking tag '$tag'." >&2
               exit 1
             fi
-            if [[ "$tag" == "$latest" ]]; then
+            if [[ "$tag" == "$latest" && "$ALLOW_LATEST" != 'true' ]]; then
               echo "Refusing to delete $tag: it is the Latest release." >&2
               exit 1
             fi
