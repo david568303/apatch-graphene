@@ -1,19 +1,19 @@
 name: Automatic APatch OTAs
 
-# Builds the APatch (KernelPatch) OTA of every device for each new GrapheneOS
-# version and publishes them as ONE normal GitHub release per version (tag =
-# the version, e.g. 2026102101). Every OTA carries an overlay that points the
-# on-device Updater at .../releases/latest/download/, so the release holds the
-# Updater's own layout per device (<device>-ota_update-<version>.zip plus one
-# metadata file per channel) and the phones update from it by themselves.
+# Builds the APatch (KernelPatch) OTA of every device that is not yet on the
+# current GrapheneOS version and publishes it to the rolling-ota-feed release,
+# replacing that device's older files. There is no release per version: the
+# feed only ever holds the newest OTAs. Every OTA carries an overlay that points
+# the on-device Updater at that release, so phones update from it by themselves,
+# and people can download from it by hand.
 #
-# A release is created as "not Latest" and only promoted by the `publish` job
-# once it holds every device, so an Updater never sees half a release. It does
-# NOT touch the Custota feed.
+# A single cheap `detect` job decides which devices still need a build, so idle
+# runs cost one job instead of one per device. After the builds the `finalize`
+# job checks that every device is in, refreshes the release notes (which say
+# what changed) and, once their week is up, deletes the old ota and ota-test
+# feeds. A run after a failure builds only what is missing.
 #
-# A single cheap `detect` job decides which devices still need a build for the
-# current version, so idle runs cost one job instead of one per device. A run
-# after a failure builds only what is missing and then promotes the release.
+# To build one device, run "Release single device".
 
 on:
   schedule:
@@ -65,21 +65,20 @@ jobs:
       device-id: ${{ matrix.device-id }}
       skip-rootless: true
       skip-apatch: false
-      # Not the Custota feed: the Updater overlay is how phones get updates.
       allow-apatch-release: true
-      skip-ota-server-upload: true
 
-  publish:
+  finalize:
     needs: [detect, release]
     # Also runs when some devices failed or nothing needed building: it only
-    # promotes a release that is already complete, and every run retries.
+    # reports and tidies up, and every scheduled run retries.
     if: ${{ !cancelled() && needs.detect.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - name: Mark the newest release Latest once it holds every device
+      - name: Check the feed is complete and refresh what is shared
         env:
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash -c ". rooted-ota.sh && markReleaseLatestIfComplete $DEVICES"
+          BUILT: ${{ needs.detect.outputs.any }}
+        run: bash -c ". rooted-ota.sh && finalizeFeed $DEVICES"

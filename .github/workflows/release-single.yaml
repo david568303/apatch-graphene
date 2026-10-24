@@ -1,14 +1,21 @@
 name: Release single device
 
+# Builds the APatch OTA of one device and puts it into the rolling-ota-feed
+# release, replacing that device's older files. Run it by hand to rebuild one
+# device; "Automatic APatch OTAs" calls it for every device that needs a build.
+#
+# With skip-release it only builds and verifies, and attaches the OTA to the
+# run as a download instead of publishing it: that is how to test a build.
+
 on:
   workflow_call:
     inputs:
       device-id:
         type: string
       skip-rootless:
-        description: skip building the rootless OTA
+        description: skip building the rootless OTA (it can no longer be released)
         type: boolean
-        default: false
+        default: true
       skip-apatch:
         description: skip building the APatch OTA
         type: boolean
@@ -30,35 +37,15 @@ on:
         type: string
         default: ''
       force-build:
-        description: force building an existing GrapheneOS device/flavor release
-        type: boolean
-        default: false
-      force-ota-server-upload:
-        description: force updating the OTA server feed
-        type: boolean
-        default: false
-      upload-test-ota:
-        description: publish to the test feed
+        description: build even if the feed already has this device's OTA for the version
         type: boolean
         default: false
       skip-release:
-        description: build and validate without publishing
+        description: build and validate without publishing; the OTA is attached to the run
         type: boolean
         default: false
       allow-apatch-release:
-        description: allow publishing APatch release assets (APatch is otherwise release-gated)
-        type: boolean
-        default: false
-      skip-ota-server-upload:
-        description: publish release assets but do not update the Custota OTA feed
-        type: boolean
-        default: false
-      release-tag-suffix:
-        description: suffix appended to the GitHub release tag (e.g. -apatch for a separate release)
-        type: string
-        default: ''
-      release-prerelease:
-        description: mark the GitHub release as a pre-release
+        description: allow publishing APatch OTAs (APatch is otherwise release-gated)
         type: boolean
         default: false
 
@@ -69,38 +56,25 @@ on:
         description: Device ID
         required: true
       skip-rootless:
-        description: skip building rootless OTA
+        description: skip building the rootless OTA (it can no longer be released)
         type: boolean
-        required: false
+        default: true
       skip-apatch:
         description: skip building the APatch OTA
         type: boolean
-        required: false
         default: false
-      upload-test-ota:
-        description: Upload OTA to test folder
-        required: false
-        type: boolean
       force-build:
-        description: Force artifacts to be built and uploaded to release if non-existing
-        required: false
+        description: build even if the feed already has this device's OTA for the version
         type: boolean
-      force-ota-server-upload:
-        description: Force OTA server upload
-        required: false
-        type: boolean
+        default: false
       skip-release:
-        description: Skip release (build only)
-        required: false
+        description: Dry run - build and verify only, the OTA is attached to the run
         type: boolean
+        default: false
       allow-apatch-release:
-        description: allow publishing APatch release assets
-        required: false
+        description: allow publishing the APatch OTA to the feed
         type: boolean
-      skip-ota-server-upload:
-        description: publish release assets but do not update the Custota OTA feed
-        required: false
-        type: boolean
+        default: false
       ota-version:
         description: OTA version
         required: false
@@ -113,13 +87,6 @@ on:
       kernelpatch-commit:
         description: Optional pinned KernelPatch source commit for a test build
         required: false
-      release-tag-suffix:
-        description: suffix appended to the GitHub release tag (e.g. -apatch for a separate release)
-        required: false
-      release-prerelease:
-        description: mark the GitHub release as a pre-release
-        type: boolean
-        required: false
 
 permissions:
   contents: write
@@ -127,12 +94,13 @@ permissions:
 jobs:
   build-device:
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # Make sure to not waste hours when some command does not return 
+    timeout-minutes: 20 # Make sure to not waste hours when some command does not return
+    # The feed is shared state: never let two runs replace the same device's files at once.
+    concurrency:
+      group: ota-feed-${{ inputs.device-id }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
-        with:
-          # Allow for switching to github-pages branch
-          fetch-depth: 0
       - name: Set inputs
         # Empty means, use version defined in rooted-ota.sh
         env:
@@ -141,16 +109,11 @@ jobs:
           KERNELPATCH_VERSION_INPUT: ${{ inputs.kernelpatch-version || '' }}
           KERNELPATCH_COMMIT_INPUT: ${{ inputs.kernelpatch-commit || '' }}
           OTA_VERSION_INPUT: ${{ inputs.ota-version || '' }}
-          SKIP_ROOTLESS_INPUT: ${{ toJSON(inputs.skip-rootless) == 'true' && 'true' || 'false' }}
+          SKIP_ROOTLESS_INPUT: ${{ toJSON(inputs.skip-rootless) == 'false' && 'false' || 'true' }}
           SKIP_APATCH_INPUT: ${{ toJSON(inputs.skip-apatch) == 'true' && 'true' || 'false' }}
-          FORCE_OTA_SERVER_UPLOAD_INPUT: ${{ toJSON(inputs.force-ota-server-upload) == 'true' && 'true' || 'false' }}
           FORCE_BUILD_INPUT: ${{ toJSON(inputs.force-build) == 'true' && 'true' || 'false' }}
-          UPLOAD_TEST_OTA_INPUT: ${{ toJSON(inputs.upload-test-ota) == 'true' && 'true' || 'false' }}
           SKIP_RELEASE_INPUT: ${{ toJSON(inputs.skip-release) == 'true' && 'true' || 'false' }}
           ALLOW_APATCH_RELEASE_INPUT: ${{ toJSON(inputs.allow-apatch-release) == 'true' && 'true' || 'false' }}
-          SKIP_OTA_SERVER_UPLOAD_INPUT: ${{ toJSON(inputs.skip-ota-server-upload) == 'true' && 'true' || 'false' }}
-          RELEASE_TAG_SUFFIX_INPUT: ${{ inputs.release-tag-suffix || '' }}
-          RELEASE_PRERELEASE_INPUT: ${{ toJSON(inputs.release-prerelease) == 'true' && 'true' || 'false' }}
         run: |
           {
             echo "DEVICE_ID=$(echo "$DEVICE_ID_INPUT" | xargs)"
@@ -158,16 +121,18 @@ jobs:
             echo "KERNELPATCH_VERSION=$(echo "$KERNELPATCH_VERSION_INPUT" | xargs)"
             echo "KERNELPATCH_COMMIT=$(echo "$KERNELPATCH_COMMIT_INPUT" | xargs)"
             echo "OTA_VERSION=$(echo "$OTA_VERSION_INPUT" | xargs)"
-            echo "FORCE_OTA_SERVER_UPLOAD=$FORCE_OTA_SERVER_UPLOAD_INPUT"
-            echo "FORCE_BUILD=$FORCE_BUILD_INPUT"
-            echo "UPLOAD_TEST_OTA=$UPLOAD_TEST_OTA_INPUT"
             echo "SKIP_ROOTLESS=$SKIP_ROOTLESS_INPUT"
             echo "SKIP_APATCH=$SKIP_APATCH_INPUT"
             echo "SKIP_RELEASE=$SKIP_RELEASE_INPUT"
             echo "ALLOW_APATCH_RELEASE=$ALLOW_APATCH_RELEASE_INPUT"
-            echo "SKIP_OTA_SERVER_UPLOAD=$SKIP_OTA_SERVER_UPLOAD_INPUT"
-            echo "RELEASE_TAG_SUFFIX=$(echo "$RELEASE_TAG_SUFFIX_INPUT" | xargs)"
-            echo "RELEASE_PRERELEASE=$RELEASE_PRERELEASE_INPUT"
+            # A dry run is for testing a build, so it must not be skipped because the feed has it already,
+            # and its files must survive until they are attached to the run.
+            if [[ "$SKIP_RELEASE_INPUT" == 'true' ]]; then
+              echo "FORCE_BUILD=true"
+              echo "SKIP_CLEANUP=true"
+            else
+              echo "FORCE_BUILD=$FORCE_BUILD_INPUT"
+            fi
           } >> "$GITHUB_ENV"
       - name: Validate signing secrets
         env:
@@ -203,7 +168,16 @@ jobs:
           CERT_OTA_BASE64: ${{ secrets.CERT_OTA_BASE64 }}
         run: |
           if [[ $SKIP_RELEASE == 'true' ]]; then
-            bash -c '. rooted-ota.sh && createRootedOta && createOtaServerData'
+            bash -c '. rooted-ota.sh && createRootedOta'
           else
             bash -c '. rooted-ota.sh && createAndReleaseRootedOta'
           fi
+      - name: Attach the dry-run OTA
+        if: ${{ inputs.skip-release }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ota-${{ env.DEVICE_ID }}
+          path: .tmp/patched/*.zip
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
