@@ -45,12 +45,22 @@ ALLOW_APATCH_RELEASE=${ALLOW_APATCH_RELEASE:-'false'}
 # replaces the files instead of adding a release. The on-device Updater reads it
 # (see buildUpdaterOverlay) and people can download from it by hand.
 FEED_TAG=${FEED_TAG:-'rolling-ota-feed'}
+# What the release page is called. The tag is an address the Updater uses, not
+# something to show people.
+FEED_TITLE='Download the latest OTA for your Pixel (GrapheneOS + APatch)'
 # The first overlay builds read other releases. Until the date below (UTC) those
 # keep getting new builds, whose overlay points at FEED_TAG, so phones on the
 # old builds can update; afterwards finalizeFeed deletes them. They are only
 # refreshed, never extended: a device is copied into one only if it is in it.
 LEGACY_FEEDS=${LEGACY_FEEDS:-'ota ota-test'}
 LEGACY_FEEDS_UNTIL=${LEGACY_FEEDS_UNTIL:-'2026-10-31'}
+# The phones as people know them, in the order the release page lists them.
+DEVICE_NAMES=(
+  'frankel:Pixel 10' 'blazer:Pixel 10 Pro' 'mustang:Pixel 10 Pro XL' 'rango:Pixel 10 Pro Fold' 'stallion:Pixel 10a'
+  'tokay:Pixel 9' 'caiman:Pixel 9 Pro' 'komodo:Pixel 9 Pro XL' 'comet:Pixel 9 Pro Fold' 'tegu:Pixel 9a'
+  'shiba:Pixel 8' 'husky:Pixel 8 Pro' 'akita:Pixel 8a' 'felix:Pixel Fold' 'tangorpro:Pixel Tablet'
+  'panther:Pixel 7' 'cheetah:Pixel 7 Pro' 'lynx:Pixel 7a' 'oriole:Pixel 6' 'raven:Pixel 6 Pro' 'bluejay:Pixel 6a'
+)
 # Where the patched OTAs are written. It must not be the folder the stock OTA is
 # downloaded to: both have the same file name, and mixing them up once published
 # the stock OTA as ours.
@@ -1070,8 +1080,8 @@ function ensureRelease() {
   id=$(releaseIdByTag "$tag")
   if [[ -z "$id" ]]; then
     curl -sL -X POST -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$GITHUB_REPO/releases" -d "{
-      \"tag_name\": \"$tag\", \"target_commitish\": \"main\", \"name\": \"$tag\",
-      \"body\": \"The newest APatch OTAs, replaced in place by every update.\"
+      \"tag_name\": \"$tag\", \"target_commitish\": \"main\", \"name\": \"$FEED_TITLE\", \"make_latest\": \"true\",
+      \"body\": \"The download table appears here as soon as every phone is built.\"
     }" >/dev/null || true
     # Another device's job may have created it first; either way it exists now.
     id=$(releaseIdByTag "$tag")
@@ -1185,18 +1195,32 @@ function publishFeedExtras() {
   putAsset "$id" '.tmp/flash-ota/flash-ota.bat' 'flash-ota.bat' 'text/plain' "$assets"
   putAsset "$id" 'avb_pkmd.bin' 'avb_pkmd.bin' 'application/octet-stream' "$assets"
 
+  local base="https://github.com/${GITHUB_REPO}/releases/download/${FEED_TAG}" entry dev zip
   sha=$(git rev-parse HEAD)
   previous=$(githubApiGet "$api/releases/$id" | jq -r '.body // ""' | grep -o 'commit/[0-9a-f]\{40\}' | head -n1 | cut -d/ -f2 || true)
-  body="Update to [GrapheneOS ${version}](https://grapheneos.org/releases#${version/%01/00})."$'\n\n'
-  body+="**What changed:** $(git log -1 --format=%s) ([\`${sha:0:7}\`](https://github.com/${GITHUB_REPO}/commit/${sha}))"$'\n\n'
-  body+="APatch ${APATCH_VERSION}, KernelPatch ${KERNELPATCH_DISPLAY_VERSION}."
-  if [[ -n "$previous" && "$previous" != "$sha" ]]; then
-    body+=$'\n\n'"**Full Changelog**: https://github.com/${GITHUB_REPO}/compare/${previous}...${sha}"
-  fi
-  body+=$'\n\n'"**Installing:** install GrapheneOS first as described in the [README](https://github.com/${GITHUB_REPO}#installation), then put the zip of your device and \`flash-ota.sh\` (Linux/macOS) or \`flash-ota.bat\` (Windows) in one folder and run the script. Check a download against its \`.sha256\` file."
-  body+=$'\n\n'"Every update replaces the files in this release, so it only holds the newest OTA of each device."
 
-  jq -n --arg body "$body" '{body: $body}' |
+  body="GrapheneOS ${version} with APatch (root). **Find your phone below and download its file.**"$'\n\n'
+  body+="| Your phone | Download | Check |"$'\n'"|---|---|---|"$'\n'
+  for entry in "${DEVICE_NAMES[@]}"; do
+    dev=${entry%%:*}
+    zip=$(awk -v d="$dev" '$2 == "uploaded" && $3 ~ ("^" d "-ota_update-[0-9]+[.]zip$") {print $3}' <<< "$assets")
+    if [[ -n "$zip" ]]; then
+      body+="| ${entry#*:} | [\`${zip}\`](${base}/${zip}) | [sha256](${base}/${zip}.sha256) |"$'\n'
+    fi
+  done
+  body+=$'\n'"### Installing"$'\n'
+  body+="1. Install GrapheneOS on the phone first, as described in the [README](https://github.com/${GITHUB_REPO}#installation). Stop before locking the bootloader."$'\n'
+  body+="2. Download your phone's file above and the installer for your computer, [flash-ota.sh](${base}/flash-ota.sh) (Linux/macOS) or [flash-ota.bat](${base}/flash-ota.bat) (Windows), into one folder."$'\n'
+  body+="3. Run the installer. It flashes the phone and, once GrapheneOS boots, offers to lock the bootloader."$'\n'
+  body+="4. Later updates are offered by the phone's own updater, so you do not need to come back here."$'\n\n'
+  body+="### What changed"$'\n'
+  body+="$(git log -1 --format=%s) ([\`${sha:0:7}\`](https://github.com/${GITHUB_REPO}/commit/${sha})). APatch ${APATCH_VERSION}, KernelPatch ${KERNELPATCH_DISPLAY_VERSION}."
+  if [[ -n "$previous" && "$previous" != "$sha" ]]; then
+    body+=" [Full changelog](https://github.com/${GITHUB_REPO}/compare/${previous}...${sha})."
+  fi
+  body+=$'\n\n'"This page always holds the newest OTA of each phone; an update replaces the files here."
+
+  jq -n --arg name "$FEED_TITLE" --arg body "$body" '{name: $name, body: $body}' |
     curl --fail -sL -X PATCH -H "Authorization: token $GITHUB_TOKEN" "$api/releases/$id" -d @- >/dev/null
   printGreen "Updated the release notes of $FEED_TAG."
 }

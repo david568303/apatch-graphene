@@ -80,5 +80,6 @@ jobs:
         env:
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILT: ${{ needs.detect.outputs.any }}
+          # A manual run always refreshes the page text, even when nothing needed building.
+          BUILT: ${{ needs.detect.outputs.any == 'true' || github.event_name == 'workflow_dispatch' }}
         run: bash -c ". rooted-ota.sh && finalizeFeed $DEVICES"
