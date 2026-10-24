@@ -1042,6 +1042,10 @@ function releaseOta() {
   for flavor in "${!POTENTIAL_ASSETS[@]}"; do
     local assetName="${POTENTIAL_ASSETS[$flavor]}"
     uploadFile ".tmp/$assetName" "$assetName" "application/zip"
+    # Checksum in sha256sum format ("<hash>  <name>"), uploaded only after the
+    # OTA itself, so it never refers to a file that is not on the release.
+    (cd .tmp && sha256sum "$assetName" > "$assetName.sha256")
+    uploadFile ".tmp/$assetName.sha256" "$assetName.sha256" "text/plain"
   done
 
   uploadInstallerAssets
