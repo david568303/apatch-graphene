@@ -428,3 +428,36 @@ DEBUG=1 \
 https://github.com/MuratovAS/grapheneos-magisk/blob/main/docker/Dockerfile
 
 https://xdaforums.com/t/guide-to-lock-bootloader-while-using-rooted-otaos-magisk-root.4510295/
+
+## Optional: update through the stock System Updater (per-flavor)
+
+This branch can build a patched GrapheneOS **System Updater** that tracks the
+`rooted-graphene/ota` releases directly, as an alternative to Custota. The
+channel picker selects the build flavor:
+
+| Channel shown | Flavor it follows |
+| ------------- | ----------------- |
+| Rootless      | rootless          |
+| Pixincreate   | pixincreate (Magisk fork) |
+| Magisk        | magisk            |
+
+It is **off by default** and changes nothing unless the build sets
+`PATCH_UPDATER=true`. The upstream release assets are not renamed or added to;
+all of the logic is in the Updater. See [`updater-patch/README.md`](updater-patch/README.md)
+for the design, the build, the integrity gates and the on-device test checklist.
+
+Notes for users:
+
+- **Use only one updater.** Every build still ships Custota, so pick either
+  Custota **or** the patched System Updater — not both pointed at the same
+  device. (The rest of this README's Custota instructions still apply if you use
+  Custota.)
+- **Switching flavor takes one update.** Changing the channel installs the other
+  flavor once at the current version; after that it only installs newer
+  GrapheneOS versions. There is no "Allow reinstall" as in Custota.
+- **Any channel works** — all three serve the same GrapheneOS build, only rooted
+  differently.
+- **If the Updater ever can't find an update**, you can always recover by
+  downloading the flavor's OTA from the
+  [releases](https://github.com/rooted-graphene/ota/releases) and
+  `adb sideload`-ing it in recovery; that path never depends on this patch.

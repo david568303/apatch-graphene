@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Build-time stand-in for the framework resource table. android:isStatic is
+     @hide, so it is missing from the public android.jar; declaring it here with
+     its real framework id (0x0101055a) lets aapt2 resolve it. Never shipped. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="android">
+    <uses-sdk android:minSdkVersion="21" />
+</manifest>

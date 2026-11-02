@@ -76,6 +76,17 @@ SKIP_MODULES=${SKIP_MODULES:-'false'}
 # Upload OTA to test folder on OTA server
 UPLOAD_TEST_OTA=${UPLOAD_TEST_OTA:-false}
 
+# --- rooted-graphene System Updater patch (updater-patch/) -------------------
+# When 'true', patchOTAs injects a patched GrapheneOS Updater plus a channel-
+# label overlay into every flavor it builds, so the stock System Updater tracks
+# the rooted-graphene/ota releases per flavor (stable=rootless, beta=pixincreate,
+# alpha=magisk). Off by default: unset, this branch behaves exactly like
+# upstream and touches nothing. See updater-patch/README.md for the build-tool
+# requirements and the on-device test checklist.
+PATCH_UPDATER=${PATCH_UPDATER:-'false'}
+# android.jar used to build the label overlay and type-check the Updater patch.
+ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
+
 OTA_CHANNEL=${OTA_CHANNEL:-stable-security-preview} # Alternative: 'stable' or 'alpha'
 NO_COLOR=${NO_COLOR:-''}
 OTA_BASE_URL="https://releases.grapheneos.org"
@@ -342,6 +353,13 @@ function patchOTAs() {
 
   base642key
 
+  if [[ "${PATCH_UPDATER}" == 'true' ]]; then
+    registerPatchModule 'updater.py' 'UpdaterModule'
+    registerPatchModule 'updater_labels.py' 'UpdaterLabelsOverlayModule'
+    buildLabelsOverlay
+    buildPatchedUpdater
+  fi
+
   for flavor in "${!POTENTIAL_ASSETS[@]}"; do
     local targetFile=".tmp/${POTENTIAL_ASSETS[$flavor]}"
 
@@ -376,6 +394,10 @@ function patchOTAs() {
       if [[ "${SKIP_MODULES}" != 'true' ]]; then
         args+=("--module-custota" ".tmp/custota.zip")
         args+=("--module-oemunlockonboot" ".tmp/oemunlockonboot.zip")
+      fi
+      if [[ "${PATCH_UPDATER}" == 'true' ]]; then
+        args+=("--module-updater-apk" ".tmp/Updater-patched.apk")
+        args+=("--module-updater-labels-overlay" ".tmp/updater-labels-overlay.apk")
       fi
       # We create csig and device JSON for OTA later if necessary
       args+=("--skip-custota-tool")
@@ -649,4 +671,96 @@ function printRed() {
   else
       print "$@"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# System Updater patch (updater-patch/). Only used when PATCH_UPDATER=true.
+# ---------------------------------------------------------------------------
+
+# Copies one of our patch-modules into the my-avbroot-setup checkout and
+# registers its class in all_modules(), so patch.py can run it. Ported from the
+# APatch flavor; fails closed if registration does not take.
+function registerPatchModule() {
+  local file="$1" class="$2"
+  local modulesDir='.tmp/my-avbroot-setup/lib/modules'
+  if [[ ! -d "$modulesDir" ]]; then
+    printRed "my-avbroot-setup modules dir not found at $modulesDir"
+    exit 1
+  fi
+  cp "patch-modules/$file" "$modulesDir/$file"
+  if ! grep -q "$class" "$modulesDir/__init__.py"; then
+    sed -i \
+      -e "/from lib.modules.oemunlockonboot import OEMUnlockOnBootModule/a\\    from lib.modules.${file%.py} import $class" \
+      -e "/^        OEMUnlockOnBootModule,\$/a\\        $class," \
+      "$modulesDir/__init__.py"
+    if ! grep -q "$class" "$modulesDir/__init__.py"; then
+      printRed "Failed to register $class in my-avbroot-setup all_modules()."
+      exit 1
+    fi
+  fi
+}
+
+# Builds and signs the channel-label runtime resource overlay
+# (updater-patch/labels-overlay/) that relabels stable/beta/alpha as
+# Rootless/Pixincreate/Magisk. Signed with the OTA key. Fails closed if the
+# hidden isStatic attribute or a label did not make it into the APK. Based on
+# the APatch flavor's buildUpdaterOverlay.
+function buildLabelsOverlay() {
+  local tool
+  for tool in aapt aapt2 apksigner openssl; do
+    if ! command -v "$tool" >/dev/null; then
+      printRed "$tool is required to build the labels overlay (Debian/Ubuntu: apt install aapt apksigner libandroid-23-java)"
+      exit 1
+    fi
+  done
+  if [[ ! -f "$ANDROID_JAR" ]]; then
+    printRed "android.jar not found at ANDROID_JAR=$ANDROID_JAR"
+    exit 1
+  fi
+  [[ -f "$KEY_OTA" && -f "$CERT_OTA" ]] || { printRed "KEY_OTA/CERT_OTA not available (run base642key first)"; exit 1; }
+
+  local src='updater-patch/labels-overlay'
+  local dir='.tmp/labels-overlay'
+  rm -rf "$dir"
+  mkdir -p "$dir"
+
+  aapt package -f -x -M "$src/stub/AndroidManifest.xml" -S "$src/stub/res" -I "$ANDROID_JAR" -F "$dir/stub.apk"
+  aapt2 compile --dir "$src/res" -o "$dir/res.zip"
+  aapt2 link -o "$dir/unsigned.apk" --manifest "$src/AndroidManifest.xml" \
+    -I "$ANDROID_JAR" -I "$dir/stub.apk" --min-sdk-version 36 --target-sdk-version 37 "$dir/res.zip"
+
+  local passin=()
+  [[ -v PASSPHRASE_OTA ]] && passin=(-passin env:PASSPHRASE_OTA)
+  openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER "${passin[@]}" -in "$KEY_OTA" -out "$dir/key.pk8"
+  apksigner sign --v1-signing-enabled false --key "$dir/key.pk8" --cert "$CERT_OTA" \
+    --out ".tmp/updater-labels-overlay.apk" "$dir/unsigned.apk"
+  rm -f "$dir/key.pk8"
+  apksigner verify ".tmp/updater-labels-overlay.apk"
+
+  if ! aapt2 dump xmltree --file AndroidManifest.xml ".tmp/updater-labels-overlay.apk" | grep -qF 'isStatic(0x0101055a)=true' ||
+    ! aapt2 dump resources ".tmp/updater-labels-overlay.apk" | grep -qF 'Rootless'; then
+    printRed 'The labels overlay is missing isStatic or the relabeled strings; not using it.'
+    exit 1
+  fi
+  printGreen "Built Updater labels overlay (Rootless/Pixincreate/Magisk)"
+}
+
+# Builds the patched Updater APK from the stock OTA already downloaded for this
+# run (.tmp/$OTA_TARGET.zip). All integrity gates and the verification live in
+# updater-patch/build.sh, which fails closed; this is just the wiring.
+function buildPatchedUpdater() {
+  [[ -f ".tmp/$OTA_TARGET.zip" ]] || { printRed "stock OTA .tmp/$OTA_TARGET.zip not found"; exit 1; }
+  [[ -f "$KEY_OTA" && -f "$CERT_OTA" ]] || { printRed "KEY_OTA/CERT_OTA not available (run base642key first)"; exit 1; }
+
+  bash updater-patch/build.sh \
+    --stock-ota ".tmp/$OTA_TARGET.zip" \
+    --key-ota "$KEY_OTA" \
+    --cert-ota "$CERT_OTA" \
+    --out ".tmp/Updater-patched.apk" \
+    --tools-dir ".tmp" \
+    --device "$DEVICE_ID" \
+    --android-jar "$ANDROID_JAR"
+
+  [[ -f ".tmp/Updater-patched.apk" ]] || { printRed "buildPatchedUpdater produced no APK"; exit 1; }
+  printGreen "Built patched Updater: .tmp/Updater-patched.apk"
 }

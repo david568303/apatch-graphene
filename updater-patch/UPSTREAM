@@ -1,0 +1,29 @@
+# Pinned GrapheneOS Updater source this patch was written against.
+#
+# build.sh clones the Updater at UPDATER_REPO and verifies that the two files
+# the patch recompiles still hash to BASELINE_* below. If GrapheneOS changes
+# either file, the hashes differ and the build FAILS CLOSED: a human must
+# re-review updater-patch/src/ against upstream and update these pins. This is
+# how the patch "cannot silently break" across GrapheneOS releases.
+#
+# The modified sources we ship live in updater-patch/src/ and are the review
+# artifact; these pins describe the stock originals they are derived from.
+
+UPDATER_REPO=https://github.com/GrapheneOS/platform_packages_apps_Updater
+
+# Pin by release tag. The Updater is tagged per GrapheneOS release; Service.java
+# and Settings.java are identical at main and at this tag (only
+# network_security_config.xml differed). Bump this to the tag of the GrapheneOS
+# version being patched and re-verify the hashes below.
+UPDATER_SRC_TAG=2026102100
+UPDATER_SRC_COMMIT=60c8c539c1d049458a2feebe5ba8c2f4f4542f04
+
+# sha256 of the pristine upstream files (src/app/seamlessupdate/client/*.java)
+BASELINE_Service_java=4a75d4b4d4a02201ff58bb3fb0148d5bbc04f0cc050796570dac8d9bee6af2e1
+BASELINE_Settings_java=d6502250c6e47048d180803f9f96a1a3d78bec48c758268ad8de7dbadc98aa23
+
+# Expected signer of the STOCK Updater.apk (GrapheneOS release key), as printed
+# by `apksigner verify --print-certs` ("Signer #1 certificate SHA-256 digest").
+# Leave UNSET to record-and-warn on first run; set it to pin once you have read
+# the value from a trusted stock build, so a resigned/tampered input is refused.
+STOCK_UPDATER_SIGNER_SHA256=

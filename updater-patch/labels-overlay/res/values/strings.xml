@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Overrides the stock Updater channel labels. The values the Updater stores
+     and sends (stable/beta/alpha) are NOT touched; only what the user sees. -->
+<resources>
+    <string name="channel_stable">Rootless</string>
+    <string name="channel_beta">Pixincreate</string>
+    <string name="channel_alpha">Magisk</string>
+</resources>

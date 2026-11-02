@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static runtime resource overlay for the GrapheneOS Updater: replaces only
+     the three channel label strings so the Settings dropdown and the
+     "up to date" notification read Rootless / Pixincreate / Magisk instead of
+     Stable / Beta / Alpha. The stored channel values (stable/beta/alpha) are
+     unchanged, so the behavior patch in Service/OtaFeed still maps them to
+     flavors. Built and signed by buildLabelsOverlay in rooted-ota.sh.
+
+     This sits next to the overlays GrapheneOS already ships in /product/overlay,
+     which the OS scans and enables (isStatic) with no config.xml involved.
+     Resource-only: no code, no permissions, no SELinux policy. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="rooted.graphene.overlay.updater.labels">
+    <overlay
+        android:targetPackage="app.seamlessupdate.client"
+        android:isStatic="true"
+        android:priority="1" />
+    <application android:hasCode="false" />
+</manifest>
