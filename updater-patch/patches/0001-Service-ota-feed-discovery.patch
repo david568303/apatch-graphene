@@ -1,0 +1,346 @@
+# Reinterpret the selected channel as a build flavor and resolve the OTA via
+# OtaFeed (rooted-graphene/ota) instead of a <device>-<channel> metadata file.
+# Full OTAs only; one-shot same-version flavor switch. Applied by updater-patch/build.sh.
+diff --git a/src/app/seamlessupdate/client/Service.java b/src/app/seamlessupdate/client/Service.java
+index c54c036..d759251 100644
+--- a/src/app/seamlessupdate/client/Service.java
++++ b/src/app/seamlessupdate/client/Service.java
+@@ -20,8 +20,6 @@ import android.os.UpdateEngineCallback;
+ import android.os.storage.StorageManager;
+ import android.util.Log;
+ 
+-import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
+-
+ import java.io.BufferedReader;
+ import java.io.File;
+ import java.io.FileOutputStream;
+@@ -29,7 +27,7 @@ import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.io.IOException;
+ import java.io.OutputStream;
+-import java.net.URL;
++import java.net.HttpURLConnection;
+ import java.nio.file.Files;
+ import java.security.GeneralSecurityException;
+ import java.util.concurrent.CountDownLatch;
+@@ -38,22 +36,33 @@ import java.util.zip.ZipFile;
+ 
+ import javax.net.ssl.HttpsURLConnection;
+ 
+-import libcore.io.IoUtils;
+-
+ import org.grapheneos.tls.ModernTLSSocketFactory;
+ 
++/**
++ * rooted-graphene variant of the GrapheneOS Updater Service.
++ *
++ * Differences from stock (all behavior; see updater-patch/README.md):
++ *   - The selected channel is a build flavor, resolved via OtaFeed against the
++ *     rooted-graphene/ota releases instead of fetching a "<device>-<channel>"
++ *     metadata file from a single server.
++ *   - Full OTAs only (the rooted feed publishes no incrementals and no
++ *     streaming assets), so the incremental/streaming paths are removed.
++ *   - A same-version install is allowed exactly once right after the user
++ *     changes flavor (the one-shot KEY_FLAVOR_SWITCH_PENDING flag); otherwise
++ *     the install is gated on a strictly newer build, as stock.
++ *
++ * Unchanged: RecoverySystem.verifyPackage + the package metadata checks + AVB
++ * via update_engine remain the trust anchors. OtaFeed output only selects the
++ * file; it is never trusted.
++ */
+ public class Service extends IntentService {
+     private static final String TAG = "Service";
+     static final String INTENT_EXTRA_NETWORK = "network";
+     static final String INTENT_EXTRA_IS_USER_INITIATED = "is_user_initiated";
+-    private static final int CONNECT_TIMEOUT = 30000;
+-    private static final int READ_TIMEOUT = 30000;
+     private static final File CARE_MAP_PATH = new File("/data/ota_package/care_map.pb");
+     private static final File UPDATE_PATH = new File("/data/ota_package/update.zip");
+-    private static final String PREFERENCE_DOWNLOAD_FILE = "download_file";
+-    private static final String PREFERENCE_FAILED_INCREMENTAL = "failed_incremental";
++    private static final String PREFERENCE_DOWNLOAD_URL = "download_url";
+     private static final int HTTP_RANGE_NOT_SATISFIABLE = 416;
+-    private static final int UPDATE_ENGINE_DOWNLOAD_STATE_INITIALIZATION_ERROR = 20;
+ 
+     private final ModernTLSSocketFactory tlsSocketFactory = new ModernTLSSocketFactory();
+ 
+@@ -70,17 +79,8 @@ public class Service extends IntentService {
+         notificationHandler = new NotificationHandler(this);
+     }
+ 
+-    private HttpsURLConnection fetchData(final Network network, final String path) throws IOException {
+-        final URL url = new URL(getString(R.string.url) + path);
+-        final HttpsURLConnection urlConnection = (HttpsURLConnection) network.openConnection(url);
+-        urlConnection.setSSLSocketFactory(tlsSocketFactory);
+-        urlConnection.setConnectTimeout(CONNECT_TIMEOUT);
+-        urlConnection.setReadTimeout(READ_TIMEOUT);
+-        return urlConnection;
+-    }
+-
+-    private void applyUpdate(final boolean streaming, final long payloadOffset,
+-            final String[] headerKeyValuePairs, final boolean incremental) throws IOException {
++    private void applyUpdate(final long payloadOffset, final String[] headerKeyValuePairs)
++            throws IOException {
+         notificationHandler.showInstallNotification(0);
+ 
+         final CountDownLatch monitor = new CountDownLatch(1);
+@@ -104,29 +104,16 @@ public class Service extends IntentService {
+             public void onPayloadApplicationComplete(final int errorCode) {
+                 Log.d(TAG, "onPayloadApplicationComplete: " + errorCode);
+                 this.errorCode = errorCode;
++                UPDATE_PATH.delete();
+                 if (errorCode == ErrorCodeConstants.SUCCESS) {
+-                    UPDATE_PATH.delete();
+                     annoyUser();
+-                } else {
+-                    UPDATE_PATH.delete();
+-                    if (incremental && errorCode == UPDATE_ENGINE_DOWNLOAD_STATE_INITIALIZATION_ERROR) {
+-                        final SharedPreferences preferences = Settings.getPreferences(Service.this);
+-                        final String downloadFile = preferences.getString(PREFERENCE_DOWNLOAD_FILE, null);
+-                        preferences.edit().putString(PREFERENCE_FAILED_INCREMENTAL, downloadFile).commit();
+-                    }
+                 }
+                 monitor.countDown();
+             }
+         };
+         engine.bind(callback);
+-        if (streaming) {
+-            final SharedPreferences preferences = Settings.getPreferences(this);
+-            final String downloadFile = preferences.getString(PREFERENCE_DOWNLOAD_FILE, null);
+-            engine.applyPayload(getString(R.string.url) + downloadFile.replace("-streaming", ""), payloadOffset, 0, headerKeyValuePairs);
+-        } else {
+-            UPDATE_PATH.setReadable(true, false);
+-            engine.applyPayload("file://" + UPDATE_PATH, payloadOffset, 0, headerKeyValuePairs);
+-        }
++        UPDATE_PATH.setReadable(true, false);
++        engine.applyPayload("file://" + UPDATE_PATH, payloadOffset, 0, headerKeyValuePairs);
+         try {
+             monitor.await();
+         } catch (InterruptedException e) {}
+@@ -148,8 +135,8 @@ public class Service extends IntentService {
+         return entry;
+     }
+ 
+-    private void onDownloadFinished(final boolean streaming, final long targetBuildDate,
+-            final String targetIncremental) throws IOException, GeneralSecurityException {
++    private void onDownloadFinished(final OtaFeed.Target target, final boolean allowEqual)
++            throws IOException, GeneralSecurityException {
+         try {
+             notificationHandler.showVerifyNotification(0);
+             RecoverySystem.verifyPackage(UPDATE_PATH, (int progress) -> {
+@@ -193,11 +180,17 @@ public class Service extends IntentService {
+                     }
+                 }
+             }
+-            if (timestamp != targetBuildDate) {
+-                throw new GeneralSecurityException("timestamp does not match server metadata");
++            // The selected build's version must match what discovery pointed at.
++            if (!target.version.equals(incremental)) {
++                throw new GeneralSecurityException("post-build-incremental " + incremental
++                        + " does not match selected version " + target.version);
+             }
+-            if (!targetIncremental.equals(incremental)) {
+-                throw new GeneralSecurityException("incremental does not match server metadata");
++            // Monotonic install gate: strictly newer, except for the one-shot
++            // same-version flavor switch, which still passes every other check.
++            final long sourceBuildDate = SystemProperties.getLong("ro.build.date.utc", 0);
++            if (timestamp < sourceBuildDate || (timestamp == sourceBuildDate && !allowEqual)) {
++                throw new GeneralSecurityException("post-timestamp " + timestamp
++                        + " not newer than installed " + sourceBuildDate);
+             }
+             if (!DEVICE.equals(device)) {
+                 throw new GeneralSecurityException("device mismatch");
+@@ -208,6 +201,8 @@ public class Service extends IntentService {
+             if (!"AB".equals(type)) {
+                 throw new GeneralSecurityException("package is not an A/B update");
+             }
++            // Full OTAs carry no pre-build fields; if present (incremental), they
++            // must match the installed build. The rooted feed ships full OTAs.
+             if (sourceIncremental != null && !sourceIncremental.equals(INCREMENTAL)) {
+                 throw new GeneralSecurityException("source incremental mismatch");
+             }
+@@ -215,6 +210,9 @@ public class Service extends IntentService {
+                 throw new GeneralSecurityException("source fingerprint mismatch");
+             }
+ 
++            if (streamingPropertyFiles == null) {
++                throw new GeneralSecurityException("ota-streaming-property-files missing");
++            }
+             Long payloadOffset = null;
+             for (final String streamingPropertyFile : streamingPropertyFiles) {
+                 final String properties[] = streamingPropertyFile.split(":");
+@@ -241,7 +239,7 @@ public class Service extends IntentService {
+             try (final var propertiesReader = new BufferedReader(new InputStreamReader(zipFile.getInputStream(payloadProperties)))) {
+                 headerKeyValuePairs = propertiesReader.lines().toArray(String[]::new);
+             }
+-            applyUpdate(streaming, payloadOffset, headerKeyValuePairs, sourceIncremental != null);
++            applyUpdate(payloadOffset, headerKeyValuePairs);
+         } catch (final GeneralSecurityException e) {
+             UPDATE_PATH.delete();
+             throw e;
+@@ -289,98 +287,67 @@ public class Service extends IntentService {
+                 throw new IOException("Network is unavailable");
+             }
+ 
+-            final String channel = SystemProperties.get("sys.update.channel", Settings.getChannel(this));
++            final String channel = Settings.getChannel(this);
+ 
+-            Log.d(TAG, "fetching metadata for " + DEVICE + "-" + channel);
+-            connection = fetchData(network, DEVICE + "-" + channel);
+-            final String[] metadata;
+-            try (final BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
+-                metadata = reader.readLine().split(" ");
++            // Consume the one-shot flavor-switch flag: a same-version install is
++            // allowed only right after the user changed flavor, and only once.
++            // Reading-and-clearing here means a failed attempt does not loop on
++            // an equal-version build; the user must toggle again.
++            final boolean allowEqual = preferences.getBoolean(Settings.KEY_FLAVOR_SWITCH_PENDING, false);
++            if (allowEqual) {
++                preferences.edit().putBoolean(Settings.KEY_FLAVOR_SWITCH_PENDING, false).commit();
+             }
+ 
+-            final String targetIncremental = metadata[0];
+-            final long targetBuildDate = Long.parseLong(metadata[1]);
+-            final long sourceBuildDate = SystemProperties.getLong("ro.build.date.utc", 0);
+-            if (targetBuildDate <= sourceBuildDate) {
++            Log.d(TAG, "resolving OTA for " + DEVICE + " channel " + channel + " allowEqual=" + allowEqual);
++            final OtaFeed.Target target = OtaFeed.resolve(network, tlsSocketFactory, channel, allowEqual);
++            if (target == null) {
+                 notificationHandler.showUpdatedNotification(channel);
+-                Log.d(TAG, "targetBuildDate: " + targetBuildDate + " not higher than sourceBuildDate: " + sourceBuildDate);
++                Log.d(TAG, "no newer update available");
+                 mUpdating = false;
+                 return;
+             }
+-            final String targetDevice = metadata[2];
+-            if (!targetDevice.equals(DEVICE)) {
+-                throw new GeneralSecurityException("targetDevice: " + targetDevice + " does not match device: " + DEVICE);
+-            }
+-            final String targetChannel = metadata[3];
+-            if (!targetChannel.equals(channel)) {
+-                throw new GeneralSecurityException("targetChannel: " + targetChannel + " does not match channel: " + channel);
+-            }
++            Log.d(TAG, "selected " + target.fileName + " (" + target.downloadUrl + ")");
+ 
+             notificationHandler.showDownloadNotification(0, 100);
+ 
+-            String downloadFile = preferences.getString(PREFERENCE_DOWNLOAD_FILE, null);
++            final String downloadUrl = target.downloadUrl;
++            final String savedUrl = preferences.getString(PREFERENCE_DOWNLOAD_URL, null);
+             long downloaded;
+-            long contentLength;
+-
+-            final boolean streaming = SystemProperties.getBoolean("sys.update.streaming_test", false);
+-
+-            final String streamingPrefix = streaming ? "-streaming" : "";
+-            final String incrementalUpdate = DEVICE + streamingPrefix + "-incremental-" + INCREMENTAL + "-" + targetIncremental + ".zip";
+-            final String fullUpdate = DEVICE + streamingPrefix + "-ota_update-" + targetIncremental + ".zip";
+-
+-            if (incrementalUpdate.equals(downloadFile) || fullUpdate.equals(downloadFile)) {
++            if (downloadUrl.equals(savedUrl)) {
+                 downloaded = UPDATE_PATH.length();
+             } else {
+                 downloaded = 0;
+             }
+ 
++            long contentLength;
+             if (downloaded > 0) {
+-                Log.d(TAG, "resume fetch of " + downloadFile + " from " + downloaded + " bytes");
+-                connection = fetchData(network, downloadFile);
++                Log.d(TAG, "resume fetch of " + downloadUrl + " from " + downloaded + " bytes");
++                connection = OtaFeed.open(network, tlsSocketFactory, downloadUrl);
+                 connection.setRequestProperty("Range", "bytes=" + downloaded + "-");
+                 final int responseCode = connection.getResponseCode();
+                 if (responseCode == HTTP_RANGE_NOT_SATISFIABLE) {
+                     Log.d(TAG, "download completed previously");
+-                    onDownloadFinished(streaming, targetBuildDate, targetIncremental);
++                    onDownloadFinished(target, allowEqual);
+                     return;
+                 }
+-                if (responseCode == HTTP_NOT_FOUND && incrementalUpdate.equals(downloadFile)) {
+-                    final InputStream error = connection.getErrorStream();
+-                    if (error != null) {
+-                        error.close();
+-                    }
+-
++                if (responseCode == HttpURLConnection.HTTP_OK) {
++                    // Server ignored the Range request; restart from the top.
++                    Log.d(TAG, "range ignored, restarting download");
+                     downloaded = 0;
+-                    UPDATE_PATH.delete();
+-
+-                    Log.d(TAG, "previous incremental not found, fetch full update " + fullUpdate);
+-                    downloadFile = fullUpdate;
+-                    connection = fetchData(network, downloadFile);
++                    Files.deleteIfExists(UPDATE_PATH.toPath());
++                    contentLength = connection.getContentLengthLong();
++                } else if (responseCode == HttpURLConnection.HTTP_PARTIAL) {
++                    contentLength = connection.getContentLengthLong() + downloaded;
++                } else {
++                    throw new IOException("unexpected response resuming download: " + responseCode);
+                 }
+-                contentLength = connection.getContentLengthLong() + downloaded;
+                 input = connection.getInputStream();
+             } else {
+                 Files.deleteIfExists(UPDATE_PATH.toPath());
+-
+-                final String failedIncremental = preferences.getString(PREFERENCE_FAILED_INCREMENTAL, null);
+-                if (incrementalUpdate.equals(failedIncremental)) {
+-                    Log.d(TAG, "incremental update initialization failed, fetch full update " + fullUpdate);
+-                    downloadFile = fullUpdate;
+-                    connection = fetchData(network, downloadFile);
+-                } else {
+-                    Log.d(TAG, "fetch incremental " + incrementalUpdate);
+-                    downloadFile = incrementalUpdate;
+-                    connection = fetchData(network, downloadFile);
+-                    if (connection.getResponseCode() == HTTP_NOT_FOUND) {
+-                        final InputStream error = connection.getErrorStream();
+-                        if (error != null) {
+-                            error.close();
+-                        }
+-
+-                        Log.d(TAG, "incremental not found, fetch full update " + fullUpdate);
+-                        downloadFile = fullUpdate;
+-                        connection = fetchData(network, downloadFile);
+-                    }
++                connection = OtaFeed.open(network, tlsSocketFactory, downloadUrl);
++                final int responseCode = connection.getResponseCode();
++                if (responseCode != HttpURLConnection.HTTP_OK) {
++                    throw new IOException("unexpected response: " + responseCode);
+                 }
+                 contentLength = connection.getContentLengthLong();
+                 input = connection.getInputStream();
+@@ -400,7 +367,7 @@ public class Service extends IntentService {
+             }
+ 
+             try (final OutputStream output = new FileOutputStream(UPDATE_PATH, downloaded != 0)) {
+-                preferences.edit().putString(PREFERENCE_DOWNLOAD_FILE, downloadFile).commit();
++                preferences.edit().putString(PREFERENCE_DOWNLOAD_URL, downloadUrl).commit();
+ 
+                 int bytesRead;
+                 long last = System.nanoTime();
+@@ -418,7 +385,7 @@ public class Service extends IntentService {
+             }
+ 
+             Log.d(TAG, "download completed");
+-            onDownloadFinished(streaming, targetBuildDate, targetIncremental);
++            onDownloadFinished(target, allowEqual);
+         } catch (GeneralSecurityException | IOException | ServiceSpecificException e) {
+             Log.e(TAG, "failed to download and install update", e);
+             notificationHandler.showFailureNotification(e.getMessage());
+@@ -432,8 +399,13 @@ public class Service extends IntentService {
+                 Log.w(TAG, "onHandleIntent() – service failed but has been scheduled for retry");
+             }
+         } finally {
+-            IoUtils.closeQuietly(input);
+-
++            if (input != null) {
++                try {
++                    input.close();
++                } catch (final IOException e) {
++                    Log.d(TAG, "closing input failed", e);
++                }
++            }
+             if (connection != null) {
+                 connection.disconnect();
+             }

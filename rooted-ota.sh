@@ -752,6 +752,10 @@ function buildPatchedUpdater() {
   [[ -f ".tmp/$OTA_TARGET.zip" ]] || { printRed "stock OTA .tmp/$OTA_TARGET.zip not found"; exit 1; }
   [[ -f "$KEY_OTA" && -f "$CERT_OTA" ]] || { printRed "KEY_OTA/CERT_OTA not available (run base642key first)"; exit 1; }
 
+  # The Updater is tagged per OS release; security-preview (…01) reuses the …00
+  # source tag, same anchoring createReleaseIfNecessary uses for changelog links.
+  local updaterSrcTag="${OTA_VERSION/%01/00}"
+
   bash updater-patch/build.sh \
     --stock-ota ".tmp/$OTA_TARGET.zip" \
     --key-ota "$KEY_OTA" \
@@ -759,6 +763,7 @@ function buildPatchedUpdater() {
     --out ".tmp/Updater-patched.apk" \
     --tools-dir ".tmp" \
     --device "$DEVICE_ID" \
+    --src-tag "$updaterSrcTag" \
     --android-jar "$ANDROID_JAR"
 
   [[ -f ".tmp/Updater-patched.apk" ]] || { printRed "buildPatchedUpdater produced no APK"; exit 1; }

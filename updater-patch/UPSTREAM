@@ -1,24 +1,29 @@
-# Pinned GrapheneOS Updater source this patch was written against.
+# Pinned GrapheneOS Updater source the patch is applied to.
 #
-# build.sh clones the Updater at UPDATER_REPO and verifies that the two files
-# the patch recompiles still hash to BASELINE_* below. If GrapheneOS changes
-# either file, the hashes differ and the build FAILS CLOSED: a human must
-# re-review updater-patch/src/ against upstream and update these pins. This is
-# how the patch "cannot silently break" across GrapheneOS releases.
+# build.sh clones the Updater at UPDATER_SRC_TAG and applies updater-patch/
+# patches/*.patch to it. The APPLY is the compatibility gate: a GrapheneOS
+# change in a region the patch does not touch (e.g. an unrelated security fix)
+# is carried through automatically, while a change that conflicts with the
+# patch makes the apply fail and STOPS the release (build.sh prints the .rej
+# hunks). So the patch cannot silently break or silently drop an upstream fix.
 #
-# The modified sources we ship live in updater-patch/src/ and are the review
-# artifact; these pins describe the stock originals they are derived from.
+# To move to a new GrapheneOS version, bump UPDATER_SRC_TAG (rooted-ota.sh
+# passes the version being built via --src-tag, which overrides this default).
+# If the patch then conflicts, update patches/ and re-pin here.
 
 UPDATER_REPO=https://github.com/GrapheneOS/platform_packages_apps_Updater
 
 # Pin by release tag. The Updater is tagged per GrapheneOS release; Service.java
 # and Settings.java are identical at main and at this tag (only
-# network_security_config.xml differed). Bump this to the tag of the GrapheneOS
-# version being patched and re-verify the hashes below.
+# network_security_config.xml differed). Security-preview versions (…01) reuse
+# the …00 source tag; rooted-ota.sh passes the …00 anchor of OTA_VERSION.
 UPDATER_SRC_TAG=2026102100
 UPDATER_SRC_COMMIT=60c8c539c1d049458a2feebe5ba8c2f4f4542f04
 
-# sha256 of the pristine upstream files (src/app/seamlessupdate/client/*.java)
+# Informational baselines (NOT the gate — the patch apply is). sha256 of the
+# pristine upstream files the patches were authored against. build.sh prints a
+# review NOTE if the upstream files at UPDATER_SRC_TAG differ from these; it
+# still requires the patch to apply. Refresh them when you re-pin.
 BASELINE_Service_java=4a75d4b4d4a02201ff58bb3fb0148d5bbc04f0cc050796570dac8d9bee6af2e1
 BASELINE_Settings_java=d6502250c6e47048d180803f9f96a1a3d78bec48c758268ad8de7dbadc98aa23
 

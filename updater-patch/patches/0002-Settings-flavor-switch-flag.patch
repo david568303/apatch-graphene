@@ -1,0 +1,44 @@
+# Set the one-shot KEY_FLAVOR_SWITCH_PENDING flag when the channel (flavor) changes,
+# so switching flavor installs the other build once at the current version.
+diff --git a/src/app/seamlessupdate/client/Settings.java b/src/app/seamlessupdate/client/Settings.java
+index 700d1cc..560c770 100644
+--- a/src/app/seamlessupdate/client/Settings.java
++++ b/src/app/seamlessupdate/client/Settings.java
+@@ -34,6 +34,11 @@ public class Settings extends CollapsingToolbarBaseActivity {
+     private static final String KEY_IDLE_REBOOT = "idle_reboot";
+     private static final String KEY_CHECK_FOR_UPDATES = "check_for_updates";
+     static final String KEY_WAITING_FOR_REBOOT = "waiting_for_reboot";
++    // One-shot: set when the user changes flavor (channel). It authorizes a
++    // single same-version install so switching flavor at the current GrapheneOS
++    // version actually installs the other build instead of reporting "up to
++    // date". Service consumes (reads and clears) it on the next check.
++    static final String KEY_FLAVOR_SWITCH_PENDING = "flavor_switch_pending";
+ 
+     static SharedPreferences getPreferences(final Context context) {
+         final Context deviceContext = context.createDeviceProtectedStorageContext();
+@@ -136,12 +141,12 @@ public class Settings extends CollapsingToolbarBaseActivity {
+                     } else {
+                         final int networkType = Settings.getNetworkType(context);
+                         final NetworkCapabilities networkCapabilities = connectivityManager.getNetworkCapabilities(network);
+-                        if (networkCapabilities != null && networkType == JobInfo.NETWORK_TYPE_UNMETERED 
++                        if (networkCapabilities != null && networkType == JobInfo.NETWORK_TYPE_UNMETERED
+                             && !networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) {
+                                 showAlertDialogForMismatchedNetwork(context, network, R.string.alert_metered_network);
+                                 return true;
+                         }
+-                        if (networkCapabilities != null && networkType == JobInfo.NETWORK_TYPE_NOT_ROAMING 
++                        if (networkCapabilities != null && networkType == JobInfo.NETWORK_TYPE_NOT_ROAMING
+                             && !networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING)) {
+                                 showAlertDialogForMismatchedNetwork(context, network, R.string.alert_roaming_network);
+                                 return true;
+@@ -194,6 +199,10 @@ public class Settings extends CollapsingToolbarBaseActivity {
+         public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
+             switch (key) {
+                 case KEY_CHANNEL:
++                    // Changing flavor authorizes exactly one same-version install.
++                    getPreferences(requireContext()).edit()
++                            .putBoolean(KEY_FLAVOR_SWITCH_PENDING, true).commit();
++                    // fall through to reschedule the check
+                 case KEY_BATTERY_NOT_LOW:
+                 case KEY_REQUIRES_CHARGING:
+                     if (!getPreferences(requireContext()).getBoolean(KEY_WAITING_FOR_REBOOT, false)) {

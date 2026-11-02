@@ -12,14 +12,17 @@
 #
 # Pipeline:
 #   1. Extract the stock Updater.apk + framework.jar from the stock OTA.
-#   2. Integrity gates (fail closed): structural check of the stock APK, signer
-#      pin, and an upstream-source drift check against updater-patch/UPSTREAM.
-#   3. dex2jar the framework + stock APK -> javac classpath.
-#   4. javac our updater-patch/src/*.java -> d8 -> smali.
-#   5. baksmali the stock dex(es), drop stock Service*/Settings*, drop in our
+#   2. Integrity gates (fail closed): structural check of the stock APK + signer
+#      pin against updater-patch/UPSTREAM.
+#   3. Clone the upstream Updater at the pinned tag and apply updater-patch/
+#      patches/ to it (+ add OtaFeed.java). The apply is the compatibility gate:
+#      it fails closed and stops the release if the patch no longer fits.
+#   4. dex2jar the framework + stock APK -> javac classpath.
+#   5. javac the patched Service/Settings + OtaFeed -> d8 -> smali.
+#   6. baksmali the stock dex(es), drop stock Service*/Settings*, drop in the
 #      recompiled Service*/Settings*/OtaFeed*, reassemble (multidex preserved).
-#   6. Repackage (stock resources untouched), zipalign, apksigner sign.
-#   7. Verify: signer, package, components/permissions unchanged, classes present.
+#   7. Repackage (stock resources untouched), zipalign, apksigner sign.
+#   8. Verify: signer, package, components/permissions unchanged, classes present.
 #
 # !!! UNTESTED against a real APK/device in this form. Treat a first green build
 # !!! as the start of on-device testing (see updater-patch/README.md), not the
@@ -36,17 +39,18 @@ OUT=''
 TOOLS_DIR=''
 ANDROID_JAR="${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}"
 DEVICE_ID=''
+SRC_TAG=''
 
 usage() {
   cat >&2 <<EOF
 usage: build.sh --stock-ota <zip> --key-ota <pem> --cert-ota <pem> \\
                 --out <apk> --tools-dir <dir> --device <codename> \\
-                [--android-jar <android.jar>]
+                [--src-tag <updater-tag>] [--android-jar <android.jar>]
 
---tools-dir must contain the avbroot and afsr binaries (rooted-ota.sh places
-them in .tmp). PASSPHRASE_OTA may be set in the environment for the OTA key.
-Set UPDATER_SKIP_DRIFT_CHECK=1 only to build offline; it disables the upstream
-source-drift gate and is unsafe for release builds.
+The patch is applied to the upstream Updater source at --src-tag (defaults to
+UPDATER_SRC_TAG in UPSTREAM). --tools-dir must contain the avbroot and afsr
+binaries (rooted-ota.sh places them in .tmp). PASSPHRASE_OTA may be set in the
+environment for the OTA key.
 EOF
   exit 2
 }
@@ -59,6 +63,7 @@ while [[ $# -gt 0 ]]; do
     --out) OUT="$2"; shift 2;;
     --tools-dir) TOOLS_DIR="$2"; shift 2;;
     --device) DEVICE_ID="$2"; shift 2;;
+    --src-tag) SRC_TAG="$2"; shift 2;;
     --android-jar) ANDROID_JAR="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; usage;;
   esac
@@ -74,7 +79,7 @@ D8="${D8:-d8}"
 say() { printf '\n== %s\n' "$*"; }
 die() { printf 'build.sh: %s\n' "$*" >&2; exit 1; }
 
-for tool in java javac unzip zip openssl apksigner zipalign aapt2 sha256sum \
+for tool in java javac git unzip zip openssl apksigner zipalign aapt2 sha256sum \
             "$DEX2JAR" "$BAKSMALI" "$SMALI" "$D8"; do
   command -v "$tool" >/dev/null || die "required tool not found: $tool"
 done
@@ -84,13 +89,14 @@ done
 
 # shellcheck source=/dev/null
 source "$HERE/UPSTREAM"
+SRC_TAG="${SRC_TAG:-$UPDATER_SRC_TAG}"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/updater-build.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 TOOLS_ABS="$(cd "$TOOLS_DIR" && pwd)"
 
 ########################################################################
-say "1/7 extract stock Updater.apk + framework.jar from $STOCK_OTA"
+say "1/8 extract stock Updater.apk + framework.jar from $STOCK_OTA"
 ########################################################################
 # Same extraction path the fork's verifyAPatchPartitions uses.
 EXDIR="$WORK/system"
@@ -105,7 +111,7 @@ FRAMEWORK_JAR="$SYSROOT/system/framework/framework.jar"
 [[ -f "$FRAMEWORK_JAR" ]] || die "framework.jar not found at $FRAMEWORK_JAR"
 
 ########################################################################
-say "2/7 integrity gates"
+say "2/8 integrity gates"
 ########################################################################
 python3 -I "$HERE/check_updater_target.py" "$STOCK_APK"
 
@@ -121,24 +127,57 @@ else
   echo "WARNING: STOCK_UPDATER_SIGNER_SHA256 unset in UPSTREAM; record and pin this: $SIGNER"
 fi
 
-# Upstream source-drift gate: the files we recompile must still match the pins.
-if [[ "${UPDATER_SKIP_DRIFT_CHECK:-0}" == "1" ]]; then
-  echo "WARNING: UPDATER_SKIP_DRIFT_CHECK=1, skipping upstream source-drift check"
-else
-  SRC="$WORK/upstream-src"
-  git clone --quiet --depth 1 --branch "$UPDATER_SRC_TAG" "$UPDATER_REPO" "$SRC" \
-    || die "could not clone $UPDATER_REPO at $UPDATER_SRC_TAG"
-  got_service="$(sha256sum "$SRC/src/app/seamlessupdate/client/Service.java" | cut -d' ' -f1)"
-  got_settings="$(sha256sum "$SRC/src/app/seamlessupdate/client/Settings.java" | cut -d' ' -f1)"
-  [[ "$got_service" == "$BASELINE_Service_java" ]] \
-    || die "upstream Service.java changed ($got_service); re-review updater-patch/src and bump UPSTREAM"
-  [[ "$got_settings" == "$BASELINE_Settings_java" ]] \
-    || die "upstream Settings.java changed ($got_settings); re-review updater-patch/src and bump UPSTREAM"
-  echo "upstream source matches the pinned baseline"
-fi
+########################################################################
+say "3/8 apply the patch to upstream source at $SRC_TAG (compatibility gate)"
+########################################################################
+# Patch the LIVE upstream source instead of shipping full-file copies. The
+# apply itself is the compatibility check: a GrapheneOS change in a region the
+# patch does not touch (e.g. an unrelated security fix) is carried through
+# automatically, while a change that conflicts with our hunks makes the apply
+# fail and STOPS the release here, before any broken Updater is produced. Add
+# a new GrapheneOS version by bumping UPDATER_SRC_TAG (rooted-ota.sh passes the
+# version being built); if the patch then conflicts, update patches/ and re-pin.
+SRC="$WORK/upstream-src"
+CLIENT_REL="app/seamlessupdate/client"
+SRC_CLIENT="$SRC/src/$CLIENT_REL"
+git clone --quiet --depth 1 --branch "$SRC_TAG" "$UPDATER_REPO" "$SRC" \
+  || die "could not clone $UPDATER_REPO at tag $SRC_TAG"
+
+# Informational only: note when upstream moved the files we touch, so the diff
+# can be reviewed. This never stops the build by itself — the apply below does.
+for f in Service Settings; do
+  eval "pinned=\${BASELINE_${f}_java:-}"
+  got="$(sha256sum "$SRC_CLIENT/$f.java" | cut -d' ' -f1)"
+  if [[ -n "$pinned" && "$got" != "$pinned" ]]; then
+    echo "NOTE: upstream $f.java at $SRC_TAG differs from the pinned baseline;"
+    echo "      the patch still has to apply cleanly below. Review and re-pin UPSTREAM."
+  fi
+done
+
+shopt -s nullglob
+PATCHES=( "$HERE"/patches/*.patch )
+shopt -u nullglob
+[[ ${#PATCHES[@]} -ge 1 ]] || die "no patches in $HERE/patches"
+# --check first so we fail BEFORE touching anything; zero fuzz (git apply does
+# not fuzz) means the patch is still compatible with this upstream source.
+for p in "${PATCHES[@]}"; do
+  if ! git -C "$SRC" apply --check "$p"; then
+    echo "build.sh: patch does not apply to $UPDATER_REPO@$SRC_TAG:" >&2
+    echo "          $p" >&2
+    git -C "$SRC" apply --reject "$p" >/dev/null 2>&1 || true
+    find "$SRC" -name '*.rej' -exec sh -c 'echo "--- $1 ---"; cat "$1"' _ {} \; >&2 || true
+    die "STOPPING release: the Updater changed upstream in a way this patch must be updated for."
+  fi
+done
+for p in "${PATCHES[@]}"; do
+  git -C "$SRC" apply "$p" || die "patch failed to apply after passing --check: $p"
+done
+# OtaFeed is a new file: add it (never patched).
+cp "$HERE/add/src/$CLIENT_REL/OtaFeed.java" "$SRC_CLIENT/OtaFeed.java"
+echo "patched Service.java + Settings.java and added OtaFeed.java"
 
 ########################################################################
-say "3/7 dex2jar framework + stock APK -> compile classpath"
+say "4/8 dex2jar framework + stock APK -> compile classpath"
 ########################################################################
 "$DEX2JAR" -f -o "$WORK/framework.jar" "$FRAMEWORK_JAR"   >/dev/null 2>&1 || true
 "$DEX2JAR" -f -o "$WORK/updater.jar"   "$STOCK_APK"       >/dev/null 2>&1 || true
@@ -147,19 +186,19 @@ say "3/7 dex2jar framework + stock APK -> compile classpath"
 CP="$ANDROID_JAR:$WORK/framework.jar:$WORK/updater.jar"
 
 ########################################################################
-say "4/7 javac our sources -> d8 -> smali"
+say "5/8 javac the patched sources -> d8 -> smali"
 ########################################################################
 mkdir -p "$WORK/classes" "$WORK/new-dex" "$WORK/smali-new"
 javac -encoding UTF-8 -source 17 -target 17 -cp "$CP" \
   -d "$WORK/classes" \
-  "$HERE"/src/app/seamlessupdate/client/*.java
+  "$SRC_CLIENT/Service.java" "$SRC_CLIENT/Settings.java" "$SRC_CLIENT/OtaFeed.java"
 # d8 our classes to a dex (min-sdk matches the app; no desugaring needed).
 mapfile -t OURCLASSES < <(find "$WORK/classes" -name '*.class')
 "$D8" --min-api 36 --output "$WORK/new-dex" --lib "$ANDROID_JAR" "${OURCLASSES[@]}"
 "$BAKSMALI" disassemble "$WORK/new-dex/classes.dex" -o "$WORK/smali-new"
 
 ########################################################################
-say "5/7 swap classes into the stock dex (multidex preserved)"
+say "6/8 swap classes into the stock dex (multidex preserved)"
 ########################################################################
 mkdir -p "$WORK/apk"
 ( cd "$WORK/apk" && unzip -q "$STOCK_APK" )
@@ -200,7 +239,7 @@ for d in "${SMALI_DIRS[@]}"; do
 done
 
 ########################################################################
-say "6/7 repackage + zipalign + sign"
+say "7/8 repackage + zipalign + sign"
 ########################################################################
 rm -rf "$WORK/apk/META-INF"   # drop the old signature
 UNSIGNED="$WORK/unsigned.apk"
@@ -218,7 +257,7 @@ apksigner sign --v1-signing-enabled false --key "$PK8" --cert "$CERT_OTA" \
 rm -f "$PK8"
 
 ########################################################################
-say "7/7 verify the rebuilt APK"
+say "8/8 verify the rebuilt APK"
 ########################################################################
 apksigner verify "$OUT"
 NEWSIGNER="$(apksigner verify --print-certs "$OUT" \

@@ -12,10 +12,15 @@ with the channel picker choosing a build flavor:
 The upstream `rooted-graphene/ota` releases are **not changed in any way** — not
 renamed, no assets added, no new storage. All of the work is on the Updater side.
 
-> **Status: untested.** The Java and resources are the reviewable core and are
-> written against the real GrapheneOS Updater sources, but the APK build
+> **Status: untested.** The patches and the new file are the reviewable core and
+> apply cleanly to the pinned GrapheneOS Updater sources, but the APK build
 > (`build.sh`) has not been run against a real APK or device here. Build it, then
 > work through the on-device checklist at the bottom before relying on it.
+
+The Updater's own source is **not vendored as full-file copies**. The changes
+ship as diffs in `patches/` applied on top of upstream's current source, plus
+one genuinely new file (`add/.../OtaFeed.java`). See "How it is built" for why
+that matters for not breaking on upstream security fixes.
 
 This is **off by default**. Nothing here runs unless `PATCH_UPDATER=true` is set
 for the build; otherwise this branch behaves exactly like upstream.
@@ -98,15 +103,27 @@ The Updater is a platform app (`platform_apis` + SettingsLib static libs) and
 can't be built from the public SDK. `build.sh` instead:
 
 1. Extracts the stock `Updater.apk` + `framework.jar` from the stock OTA.
-2. Runs the **integrity gates** below.
-3. `dex2jar`s the framework + stock APK to form a compile classpath, so
-   `javac` type-checks `src/*.java` against the app's *real* classes (a patch
-   that calls something that no longer exists fails to compile).
-4. `d8` → smali for our classes, then swaps them into the stock dex via
+2. Runs the stock-APK **integrity gates** below.
+3. Clones the upstream Updater at the pinned tag and **applies `patches/`** to
+   it (adding `OtaFeed.java`). The apply is the compatibility gate — see below.
+4. `dex2jar`s the framework + stock APK to form a compile classpath, so
+   `javac` type-checks the *patched upstream* `Service`/`Settings` + `OtaFeed`
+   against the app's *real* classes (a patch that calls something that no longer
+   exists fails to compile).
+5. `d8` → smali for those classes, then swaps them into the stock dex via
    `baksmali`/`smali` (multidex preserved), leaving all other classes and all
    resources byte-for-byte.
-5. `zipalign` + `apksigner` sign with the OTA key.
-6. **Verifies** the result (below).
+6. `zipalign` + `apksigner` sign with the OTA key.
+7. **Verifies** the result (below).
+
+### Why patches, not full-file copies
+
+Shipping whole modified `.java` files would silently go stale: a GrapheneOS
+security fix to `Service.java` would be absent from the copy until a human
+noticed. Applying diffs to upstream's *live* source instead means an upstream
+fix in a region the patch does not touch is **carried through automatically**,
+and the build only stops when a change actually conflicts with the patch —
+which is exactly the "warn and stop the release, don't break" behavior wanted.
 
 Then the my-avbroot-setup modules inject it: `patch-modules/updater.py` replaces
 `/system/priv-app/Updater/Updater.apk`; `patch-modules/updater_labels.py` adds
@@ -118,10 +135,13 @@ the label overlay to `/product/overlay`.
   contains the `Service`/`Settings` classes and the label resources.
 - **Signer pin**: stock APK must match `STOCK_UPDATER_SIGNER_SHA256` in
   `UPSTREAM` once set (records-and-warns until you pin it).
-- **Source-drift gate**: the upstream `Service.java`/`Settings.java` at the
-  pinned tag must still hash to the baselines in `UPSTREAM`. If GrapheneOS
-  changes either file, the build **fails** so a human re-reviews `src/` and bumps
-  the pins — this is what stops the patch silently breaking across releases.
+- **Patch-apply gate (the main compatibility check)**: `patches/` must apply to
+  the upstream source at the pinned tag. If GrapheneOS changed a region the
+  patch touches, the apply fails, the `.rej` hunks are printed, and the build
+  **stops** — a human updates `patches/` and re-pins. If GrapheneOS changed only
+  untouched regions, the apply succeeds and those changes (including security
+  fixes) are kept; `UPSTREAM`'s informational baselines trigger a review NOTE in
+  that case but do not stop the build.
 - **Post-build verification**: signer is the OTA key, package unchanged,
   components/permissions identical to stock, our classes present in the dex.
 
