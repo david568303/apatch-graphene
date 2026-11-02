@@ -48,18 +48,21 @@ FEED_TAG=${FEED_TAG:-'rolling-ota-feed'}
 # What the release page is called. The tag is an address the Updater uses, not
 # something to show people.
 FEED_TITLE='Download the latest OTA for your Pixel (GrapheneOS + APatch)'
-# The first overlay builds read other releases. A phone on one of them can
-# never auto-bridge onto FEED_TAG: the Updater only installs a build dated
-# after the one it is running, and every rebuild of the same GrapheneOS
-# version carries that version's own timestamp unchanged, however many times
-# we repatch it. So these feeds cannot migrate anyone on a schedule, only by
-# coincidence with a real GrapheneOS release; expiring them on a calendar
-# date buys nothing and just turns into a hard failure for whoever is still
-# pointed at one. They are kept, refreshed, until retired by hand (see
-# delete-releases.yaml) once nothing needs them. Refreshed, never extended: a
-# device is copied into one only if it is in it already. Moving a phone onto
-# FEED_TAG takes one manual update, the same as a first install.
+# The first overlay builds read other releases, meant as a temporary gateway
+# for phones still on them: the Updater only installs a build dated after the
+# one it is running, and every rebuild of the same GrapheneOS version carries
+# that version's own timestamp unchanged, however many times we repatch it.
+# So a phone on one of these can only ever auto-bridge onto FEED_TAG at the
+# moment GrapheneOS itself ships a version newer than
+# LEGACY_FEEDS_BASELINE_VERSION (the version every device was on when these
+# were frozen) - never before, however long they are kept. deleteExpiredLegacyFeeds
+# holds them open past LEGACY_FEEDS_UNTIL until that has actually happened, so
+# the gateway cannot be deleted out from under a phone that never had a real
+# build to cross on. Refreshed, never extended: a device is copied into one
+# only if it is in it already.
 LEGACY_FEEDS=${LEGACY_FEEDS:-'ota ota-test'}
+LEGACY_FEEDS_BASELINE_VERSION=2026102101
+LEGACY_FEEDS_UNTIL=${LEGACY_FEEDS_UNTIL:-'2026-11-16'}
 # The phones as people know them, in the order the release page lists them.
 DEVICE_NAMES=(
   'frankel:Pixel 10' 'blazer:Pixel 10 Pro' 'mustang:Pixel 10 Pro XL' 'rango:Pixel 10 Pro Fold' 'stallion:Pixel 10a'
@@ -1047,6 +1050,35 @@ function releaseOta() {
   RELEASE_ID=$(ensureRelease "$FEED_TAG")
   publishDeviceTo "$RELEASE_ID" "$zipName"
   mirrorToLegacyFeeds "$zipName"
+
+  # One-off recovery: SEED_LEGACY_FEED names a legacy tag to (re)create and
+  # publish this device into regardless of mirrorToLegacyFeeds' "already in
+  # it" gate, for when a legacy feed was lost or never had this device. Unset
+  # in ordinary runs; the automatic workflow never sets it.
+  if [[ -n "${SEED_LEGACY_FEED:-}" ]]; then
+    seedLegacyFeed "$SEED_LEGACY_FEED" "$zipName"
+  fi
+}
+
+# Recreates a legacy feed if its release is gone, then publishes one device
+# into it unconditionally. See SEED_LEGACY_FEED above; ordinary refreshes go
+# through mirrorToLegacyFeeds once this has run.
+function seedLegacyFeed() {
+  local tag="$1" zipName="$2" id
+  id=$(releaseIdByTag "$tag")
+  if [[ -z "$id" ]]; then
+    curl --fail -sL -X POST -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$GITHUB_REPO/releases" -d "{
+      \"tag_name\": \"$tag\", \"target_commitish\": \"main\", \"prerelease\": true, \"name\": \"$tag\",
+      \"body\": \"A legacy address some old builds' Updater overlay still points at. Get the current OTA from the ${FEED_TAG} release instead.\"
+    }" >/dev/null
+    id=$(releaseIdByTag "$tag")
+  fi
+  if [[ -z "$id" ]]; then
+    printRed "Cannot find or create the legacy feed $tag."
+    exit 1
+  fi
+  publishDeviceTo "$id" "$zipName"
+  printGreen "Seeded $DEVICE_ID into the legacy feed $tag."
 }
 
 # The last line of defence before anything is published: the OTA must carry our
@@ -1164,6 +1196,8 @@ function finalizeFeed() {
     if (( ver > newest )); then newest=$ver; fi
   done
 
+  deleteExpiredLegacyFeeds "$newest"
+
   id=$(releaseIdByTag "$FEED_TAG")
   if [[ -z "$id" ]]; then
     print "There is no $FEED_TAG release yet."
@@ -1226,6 +1260,28 @@ function publishFeedExtras() {
   jq -n --arg name "$FEED_TITLE" --arg body "$body" '{name: $name, body: $body}' |
     curl --fail -sL -X PATCH -H "Authorization: token $GITHUB_TOKEN" "$api/releases/$id" -d @- >/dev/null
   printGreen "Updated the release notes of $FEED_TAG."
+}
+
+# Deletes the legacy feeds, and their tags, once LEGACY_FEEDS_UNTIL has passed
+# AND GrapheneOS has shipped something newer than LEGACY_FEEDS_BASELINE_VERSION
+# ($1, finalizeFeed's "newest"). Before that, no phone still on one of them
+# could possibly have had a build to cross on yet, so deleting it would strand
+# them with nothing to update to, ever.
+function deleteExpiredLegacyFeeds() {
+  local newest="$1" api="https://api.github.com/repos/${GITHUB_REPO}" tag id
+  if [[ ! "$(date -u +%F)" > "$LEGACY_FEEDS_UNTIL" ]]; then return 0; fi
+  if (( newest <= LEGACY_FEEDS_BASELINE_VERSION )); then
+    print "Keeping the legacy feeds: GrapheneOS is still on $newest, so a phone on one of them has had nothing newer to cross on yet."
+    return 0
+  fi
+  for tag in $LEGACY_FEEDS; do
+    if [[ "$tag" == "$FEED_TAG" ]]; then continue; fi
+    id=$(releaseIdByTag "$tag")
+    if [[ -z "$id" ]]; then continue; fi
+    curl --fail -sL -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$api/releases/$id"
+    curl -sL -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$api/git/refs/tags/$tag" >/dev/null || true
+    printGreen "Deleted the expired legacy feed $tag."
+  done
 }
 
 # Builds the installers that get released from flash-ota.sh and

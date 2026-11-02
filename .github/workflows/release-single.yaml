@@ -48,6 +48,10 @@ on:
         description: allow publishing APatch OTAs (APatch is otherwise release-gated)
         type: boolean
         default: false
+      seed-legacy-feed:
+        description: recreate this legacy tag (e.g. ota-test) if missing and publish this device into it, bypassing the normal already-in-it gate
+        type: string
+        default: ''
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -87,6 +91,9 @@ on:
       kernelpatch-commit:
         description: Optional pinned KernelPatch source commit for a test build
         required: false
+      seed-legacy-feed:
+        description: recreate this legacy tag (e.g. ota-test) if missing and publish this device into it, bypassing the normal already-in-it gate
+        required: false
 
 permissions:
   contents: write
@@ -109,6 +116,7 @@ jobs:
           KERNELPATCH_VERSION_INPUT: ${{ inputs.kernelpatch-version || '' }}
           KERNELPATCH_COMMIT_INPUT: ${{ inputs.kernelpatch-commit || '' }}
           OTA_VERSION_INPUT: ${{ inputs.ota-version || '' }}
+          SEED_LEGACY_FEED_INPUT: ${{ inputs.seed-legacy-feed || '' }}
           SKIP_ROOTLESS_INPUT: ${{ toJSON(inputs.skip-rootless) == 'false' && 'false' || 'true' }}
           SKIP_APATCH_INPUT: ${{ toJSON(inputs.skip-apatch) == 'true' && 'true' || 'false' }}
           FORCE_BUILD_INPUT: ${{ toJSON(inputs.force-build) == 'true' && 'true' || 'false' }}
@@ -121,6 +129,7 @@ jobs:
             echo "KERNELPATCH_VERSION=$(echo "$KERNELPATCH_VERSION_INPUT" | xargs)"
             echo "KERNELPATCH_COMMIT=$(echo "$KERNELPATCH_COMMIT_INPUT" | xargs)"
             echo "OTA_VERSION=$(echo "$OTA_VERSION_INPUT" | xargs)"
+            echo "SEED_LEGACY_FEED=$(echo "$SEED_LEGACY_FEED_INPUT" | xargs)"
             echo "SKIP_ROOTLESS=$SKIP_ROOTLESS_INPUT"
             echo "SKIP_APATCH=$SKIP_APATCH_INPUT"
             echo "SKIP_RELEASE=$SKIP_RELEASE_INPUT"
