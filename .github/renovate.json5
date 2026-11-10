@@ -39,8 +39,9 @@
         '!bmax121/APatch',
         '!bmax121/KernelPatch',
       ],
-      description: 'Leave dependencies shared with upstream to the upstream sync',
-      enabled: false,
+      description: 'Build tools shared with upstream rooted-graphene (avbroot, afsr, Custota, Python, my-avbroot-setup). The upstream merge sync that used to bring these was retired: the fork replaced the Magisk flavors with APatch, so merges only conflicted. They change how every OTA is built, so propose them together and never merge them automatically.',
+      groupName: 'OTA build tools',
+      automerge: false,
     },
   ],
   customManagers: [
