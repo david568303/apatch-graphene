@@ -112,15 +112,19 @@ APATCH_BOOT_IMAGE=''
 KERNELPATCH_SOURCE_REPO=${KERNELPATCH_SOURCE_REPO:-'https://github.com/david568303/KernelPatch.git'}
 KERNELPATCH_TOOLCHAIN_URL='https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz'
 KERNELPATCH_TOOLCHAIN_SHA256='62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f39415aab528daf'
-# fix/arm64-mte-image-size in the fork: upstream main ef52c62 plus:
-# - kptools reserves the region KernelPatch copies its start image to, so the
-#   bootloader cannot place the ramdisk/DTB there
-# - cred offset scans stay inside the slab object; GrapheneOS enables MTE with
-#   kasan.fault=panic, and the out-of-bounds read was the mustang "Early
-#   Kernel PANIC" (reproduced in QEMU with mte=on)
+# fix/arm64-current-tpidrro-el0 in the fork: upstream main d4c88d6 plus one
+# commit. Upstream now carries the fork's two earlier fixes (image_size over
+# the relocated start image, #335; MTE-bounded cred scans, #336) and the BTI
+# landing pad at paging_init (#337). The extra commit supports kernels that
+# keep 'current' in TPIDRRO_EL0 instead of SP_EL0: the android17-6.18 kernel
+# GrapheneOS 2026110800 moved the Pixel 10 family to. Without #337 and that
+# commit such an image panics before init (the bootloader then falls back to
+# the old slot after three tries). Both were reproduced and the fix verified
+# in QEMU (virt, mte=on, kasan.fault=panic) on 6.18.38 and, for regressions,
+# on the 6.1.182 kernel the other devices use.
 # Used by every device (resolveAPatchRelease defaults KERNELPATCH_COMMIT to
 # this when unset), not just mustang.
-KERNELPATCH_FORK_COMMIT='280d32d967feb7ddc0fd1848aa1d1388807945d5'
+KERNELPATCH_FORK_COMMIT='e54178fe1aa3b2e069cf643528644793e3c19b02'
 
 # Every APatch OTA ships with a static overlay that points the on-device
 # GrapheneOS Updater at the FEED_TAG release (below) instead of
@@ -707,6 +711,16 @@ function patchAPatchBootImage() {
       "can'?t find arm64 relocation table|arm64 relocation kernel_va: 0xffffffffffffffff" \
       kptools-patch.log; then
       printRed 'Warning: KernelPatch could not resolve the arm64 relocation table and used its relative-base kallsyms path.'
+    fi
+
+    # kptools checks that the kernel reads 'current' the way KernelPatch
+    # expects, by looking at how pid_vnr starts. When that check fails the
+    # runtime cannot find the current task either and the image panics before
+    # init: this is exactly what the 6.18 Pixel 10 builds of 2026110801 did,
+    # while every bootable build passed it. Never publish such an image.
+    if grep -Fq 'pid_vnr verification failed' kptools-patch.log; then
+      printRed "KernelPatch does not recognise how this kernel accesses 'current' (pid_vnr verification failed); refusing to publish an image that would panic at boot."
+      exit 1
     fi
 
     # memblock_alloc_try_nid changed from a three-argument physical allocator
