@@ -115,8 +115,11 @@ APATCH_BOOT_IMAGE=''
 KERNELPATCH_SOURCE_REPO=${KERNELPATCH_SOURCE_REPO:-'https://github.com/david568303/KernelPatch.git'}
 KERNELPATCH_TOOLCHAIN_URL='https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz'
 KERNELPATCH_TOOLCHAIN_SHA256='62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f39415aab528daf'
-# fix/arm64-current-tpidrro-el0 in the fork: upstream main d4c88d6 plus one
-# commit. Upstream now carries the fork's two earlier fixes (image_size over
+# fix/arm64-current-tpidrro-el0 in the fork: upstream main d4c88d6 plus two
+# commits (the second: the SELinux hook found avc_denied's avd in the wrong
+# argument on 6.13+ kernels and wrote through NULL in APatch's first exec; seen
+# on mustang hardware, where the first fix got as far as init's early-init).
+# The first commit: Upstream now carries the fork's two earlier fixes (image_size over
 # the relocated start image, #335; MTE-bounded cred scans, #336) and the BTI
 # landing pad at paging_init (#337). The extra commit supports kernels that
 # keep 'current' in TPIDRRO_EL0 instead of SP_EL0: the android17-6.18 kernel
@@ -127,7 +130,7 @@ KERNELPATCH_TOOLCHAIN_SHA256='62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f
 # on the 6.1.182 kernel the other devices use.
 # Used by every device (resolveAPatchRelease defaults KERNELPATCH_COMMIT to
 # this when unset), not just mustang.
-KERNELPATCH_FORK_COMMIT='e54178fe1aa3b2e069cf643528644793e3c19b02'
+KERNELPATCH_FORK_COMMIT='72822ec500e8b9bc9e7fef7a18ed6b4db714b941'
 
 # Every APatch OTA ships with a static overlay that points the on-device
 # GrapheneOS Updater at the FEED_TAG release (below) instead of
