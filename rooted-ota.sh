@@ -62,7 +62,10 @@ FEED_TITLE='Download the latest OTA for your Pixel (GrapheneOS + APatch)'
 # only if it is in it already.
 LEGACY_FEEDS=${LEGACY_FEEDS:-'ota ota-test'}
 LEGACY_FEEDS_BASELINE_VERSION=2026102101
-LEGACY_FEEDS_UNTIL=${LEGACY_FEEDS_UNTIL:-'2026-11-16'}
+# Extended from 2026-11-16: the first build newer than the baseline, 2026110801,
+# did not boot on the Pixel 10 family (see feed-notes.md), so a phone on a
+# legacy feed could not cross on it until it was rebuilt on 2026-11-10.
+LEGACY_FEEDS_UNTIL=${LEGACY_FEEDS_UNTIL:-'2026-12-31'}
 # The phones as people know them, in the order the release page lists them.
 DEVICE_NAMES=(
   'frankel:Pixel 10' 'blazer:Pixel 10 Pro' 'mustang:Pixel 10 Pro XL' 'rango:Pixel 10 Pro Fold' 'stallion:Pixel 10a'
@@ -1268,6 +1271,11 @@ function publishFeedExtras() {
   body+="$(git log -1 --format=%s) ([\`${sha:0:7}\`](https://github.com/${GITHUB_REPO}/commit/${sha})). APatch ${APATCH_VERSION}, KernelPatch ${KERNELPATCH_DISPLAY_VERSION}."
   if [[ -n "$previous" && "$previous" != "$sha" ]]; then
     body+=" [Full changelog](https://github.com/${GITHUB_REPO}/compare/${previous}...${sha})."
+  fi
+  # Hand-written notes for people reading the page (feed-notes.md), kept in the
+  # repository because this text is regenerated on every refresh.
+  if [[ -s feed-notes.md ]]; then
+    body+=$'\n\n'"$(cat feed-notes.md)"
   fi
   body+=$'\n\n'"This page always holds the newest OTA of each phone; an update replaces the files here."
 
