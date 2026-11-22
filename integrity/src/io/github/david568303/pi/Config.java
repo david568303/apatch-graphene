@@ -6,11 +6,13 @@
 package io.github.david568303.pi;
 
 import java.io.File;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
 import org.json.JSONArray;
@@ -36,12 +38,19 @@ final class Config {
     private static volatile long sRotMtime = -1L;
 
     final Set<String> packages;
-    final String keyboxUrl;
+    final String keyboxUrl;          // $INTEGRITY_KEYBOX_URL, baked into config
+    final byte[] keyboxSignKey;      // Ed25519 public half of the bundle signer
+    final Set<String> googleRoots;   // pinned root SPKI SHA-256, lowercase hex
+    final Set<BigInteger> revokedSerials;
     final RootOfTrust rootOfTrust;
 
-    private Config(Set<String> packages, String keyboxUrl, RootOfTrust rot) {
+    private Config(Set<String> packages, String keyboxUrl, byte[] keyboxSignKey,
+                   Set<String> googleRoots, Set<BigInteger> revokedSerials, RootOfTrust rot) {
         this.packages = packages;
         this.keyboxUrl = keyboxUrl;
+        this.keyboxSignKey = keyboxSignKey;
+        this.googleRoots = googleRoots;
+        this.revokedSerials = revokedSerials;
         this.rootOfTrust = rot;
     }
 
@@ -103,10 +112,65 @@ final class Config {
                 }
             }
         }
-        String keyboxUrl = cfg.optString("keyboxUrl", null);
+        String keyboxUrl = emptyToNull(cfg.optString("keyboxUrl", null));
+
+        byte[] signKey = null;
+        String sk = emptyToNull(cfg.optString("keyboxSignKey", null));
+        if (sk != null) {
+            signKey = decode(sk);
+        }
+
+        Set<String> roots = new HashSet<>();
+        JSONArray rootsArr = cfg.optJSONArray("googleRoots");
+        if (rootsArr != null) {
+            for (int i = 0; i < rootsArr.length(); i++) {
+                String h = rootsArr.optString(i, null);
+                if (h != null && !h.isEmpty()) {
+                    roots.add(h.trim().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+
+        Set<BigInteger> revoked = new HashSet<>();
+        JSONArray revArr = cfg.optJSONArray("revokedSerials");
+        if (revArr != null) {
+            for (int i = 0; i < revArr.length(); i++) {
+                BigInteger s = parseSerial(revArr.optString(i, null));
+                if (s != null) {
+                    revoked.add(s);
+                }
+            }
+        }
 
         RootOfTrust rot = loadRootOfTrust();
-        return new Config(Collections.unmodifiableSet(pkgs), keyboxUrl, rot);
+        return new Config(Collections.unmodifiableSet(pkgs), keyboxUrl, signKey,
+                Collections.unmodifiableSet(roots), Collections.unmodifiableSet(revoked), rot);
+    }
+
+    private static String emptyToNull(String s) {
+        return (s == null || s.trim().isEmpty()) ? null : s.trim();
+    }
+
+    /** Serials may be written as hex (0x.. or an even hex run) or decimal. */
+    static BigInteger parseSerial(String s) {
+        if (s == null) {
+            return null;
+        }
+        s = s.trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        try {
+            if (s.startsWith("0x") || s.startsWith("0X")) {
+                return new BigInteger(s.substring(2), 16);
+            }
+            if (s.matches("(?i)^[0-9a-f]+$") && s.matches(".*[a-fA-F].*")) {
+                return new BigInteger(s, 16);
+            }
+            return new BigInteger(s);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static RootOfTrust loadRootOfTrust() throws Exception {

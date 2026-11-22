@@ -34,10 +34,6 @@ final class KeyProviderManager {
 
     private KeyProviderManager() {}
 
-    // The baked keybox. Step 4 replaces activeFile()/version() with the
-    // multi-source KeyboxSource (GMS cache, signed fetch, then this fallback).
-    private static final File KEYBOX_FILE = new File(Config.DIR, "keybox.xml");
-
     static IKeyboxProvider getProvider() {
         DefaultKeyboxProvider p = sInstance;
         long version = version();
@@ -53,13 +49,18 @@ final class KeyProviderManager {
         return p;
     }
 
-    /** Version token of the active keybox (file mtime); changes invalidate caches. */
+    /** Version token of the active keybox; changes invalidate the chain cache. */
     static long version() {
-        return KEYBOX_FILE.lastModified();
+        return KeyboxSource.version();
     }
 
     static File activeFile() {
-        return KEYBOX_FILE;
+        return KeyboxSource.activeFile();
+    }
+
+    /** Parse arbitrary keybox XML without caching, for KeyboxSource validation. */
+    static IKeyboxProvider parseForValidation(String xml) throws Exception {
+        return DefaultKeyboxProvider.parse(0L, xml);
     }
 
     /** Parses a keybox XML into EC/RSA batch keys and certificate chains. */
