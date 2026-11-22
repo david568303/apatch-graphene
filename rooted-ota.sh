@@ -1359,6 +1359,16 @@ function patchOTAs() {
 
   base642key
 
+  # Hoisted above the flavor switch so the integrity hook is built and registered
+  # even when SKIP_APATCH=true (no apatch flavor). buildIntegrityHook patches
+  # framework.jar and rebuilds the boot image; registerPatchModule makes patch.py
+  # load IntegrityModule. The --module-integrity-* flags are passed per flavor
+  # below.
+  if [[ "$INTEGRITY_PATCH" == 'true' ]]; then
+    buildIntegrityHook
+    registerPatchModule 'integrity.py' 'IntegrityModule'
+  fi
+
   if [[ "${POTENTIAL_ASSETS['apatch']+isset}" ]]; then
     patchAPatchBootImage
     if [[ "$APATCH_PREINSTALL_MANAGER" == 'true' ]]; then
@@ -1390,6 +1400,10 @@ function patchOTAs() {
         fi
         args+=("--module-updater-overlay" ".tmp/updater-overlay.apk")
       fi
+      if [[ "$INTEGRITY_PATCH" == 'true' ]]; then
+        args+=("--module-integrity-framework" "$INTEGRITY_FRAMEWORK_OVERLAY")
+        args+=("--module-integrity-conf" "$INTEGRITY_CONF_DIR")
+      fi
 
       # If env vars not set, passphrases will be queried interactively
       if [ -v PASSPHRASE_AVB ]; then
@@ -1408,8 +1422,10 @@ function patchOTAs() {
       # APatch flavor ships without them (it is updated through the Updater overlay
       # or by sideloading, not a Custota feed), so its system image stays stock
       # apart from avbroot's own otacerts.zip replacement; verifyAPatchPartitions
-      # proves that after patching.
-      if [[ "${SKIP_MODULES}" != 'true' && "$flavor" != 'apatch' ]]; then
+      # proves that after patching. An integrity build is likewise kept minimal so
+      # verifyAPatchPartitions can prove the system is stock apart from exactly the
+      # framework.jar, boot image and playintegrity changes.
+      if [[ "${SKIP_MODULES}" != 'true' && "$flavor" != 'apatch' && "$INTEGRITY_PATCH" != 'true' ]]; then
         args+=("--module-custota" ".tmp/custota.zip")
         args+=("--module-oemunlockonboot" ".tmp/oemunlockonboot.zip")
       fi
