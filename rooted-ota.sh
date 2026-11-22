@@ -166,6 +166,29 @@ SKIP_MODULES=${SKIP_MODULES:-'false'}
 # Upload OTA to test folder on OTA server
 UPLOAD_TEST_OTA=${UPLOAD_TEST_OTA:-false}
 
+# Bake the rootless Play Integrity strong-integrity hook (integrity/) into the
+# system image. When 'true', buildIntegrityHook patches framework.jar, rebuilds
+# the boot image from it, and the integrity.py module writes both plus the baked
+# /system/etc/playintegrity config; verifyAPatchPartitions then proves the
+# system partition is stock apart from exactly those changes. No Magisk, no
+# APatch, no modules, no init services, no SELinux policy.
+INTEGRITY_PATCH=${INTEGRITY_PATCH:-'false'}
+# Path to the keybox XML baked as /system/etc/playintegrity/keybox.xml. Supplied
+# per build, outside the repo, never committed. Mandatory when INTEGRITY_PATCH.
+INTEGRITY_KEYBOX=${INTEGRITY_KEYBOX:-''}
+# Optional: URL of the Ed25519-signed keybox bundle the hook background-fetches
+# to rotate the keybox on device (config.json keyboxUrl). The signer's public
+# half goes in INTEGRITY_KEYBOX_SIGN_KEY.
+INTEGRITY_KEYBOX_URL=${INTEGRITY_KEYBOX_URL:-''}
+# Optional base64 Ed25519 public key that signs the fetched bundle.
+INTEGRITY_KEYBOX_SIGN_KEY=${INTEGRITY_KEYBOX_SIGN_KEY:-''}
+# Caller packages that receive a spoofed attestation chain (comma-separated).
+INTEGRITY_PACKAGES=${INTEGRITY_PACKAGES:-'com.google.android.gms'}
+# RootOfTrust values the spoofed leaf attests to. deviceLocked/verifiedBootState
+# are fixed to the strong state; these two are hex/base64, default 32 zero bytes.
+INTEGRITY_VERIFIED_BOOT_KEY=${INTEGRITY_VERIFIED_BOOT_KEY:-''}
+INTEGRITY_VERIFIED_BOOT_HASH=${INTEGRITY_VERIFIED_BOOT_HASH:-''}
+
 OTA_CHANNEL=${OTA_CHANNEL:-stable-security-preview} # Alternative: 'stable' or 'alpha'
 NO_COLOR=${NO_COLOR:-''}
 OTA_BASE_URL="https://releases.grapheneos.org"
@@ -182,6 +205,25 @@ PYTHON_VERSION=3.14.8-alpine
 OEMUNLOCKONBOOT_VERSION=1.4
 # renovate: datasource=github-releases packageName=chenxiaolong/afsr versioning=semver
 AFSR_VERSION=2.0.0
+
+# Play Integrity hook (integrity/) build tools, all pinned by SHA-256 and
+# fetched from their canonical hosts by downloadIntegrityTools. R8 provides both
+# d8 and R8 for the hook dex; apktool-cli bundles smali/baksmali 3.0.9 (modern
+# dex) for the framework surgery; BouncyCastle is compiled in and repackaged;
+# android.jar is the compile-time library only.
+# renovate: datasource=maven packageName=com.android.tools:r8 registryUrl=https://maven.google.com
+R8_VERSION=9.5.33
+R8_SHA256=9743e95de295fb6f5490e21da26536e4d0921809511423122ff20328a572e7f5
+# renovate: datasource=maven packageName=org.bouncycastle:bcprov-jdk18on
+BOUNCYCASTLE_VERSION=1.78.1
+BCPROV_SHA256=add5915e6acfc6ab5836e1fd8a5e21c6488536a8c1f21f386eeb3bf280b702d7
+BCPKIX_SHA256=4b48ea084e5232b9d79ebca1887b9de037b124931807cd60710748c2aee08cc9
+# renovate: datasource=maven packageName=org.apktool:apktool-cli
+APKTOOL_VERSION=2.11.1
+APKTOOL_SHA256=4920d21254ab9275d402f8cc30e5cef55a4e726c434daeaa487a238457efbfb5
+# android.jar (API 34) is new enough for every framework API the hook uses.
+ANDROID_HOOK_JAR_URL='https://raw.githubusercontent.com/Sable/android-platforms/master/android-34/android.jar'
+ANDROID_HOOK_JAR_SHA256=6cea1df3efb77103ac3e2beb9bf4718964b0e0869ab16d39d29d5cbae1c147ad
 
 CHENXIAOLONG_PK='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDOe6/tBnO7xZhAWXRj3ApUYgn+XZ0wnQiXM8B7tPgv4'
 GIT_PUSH_RETRIES=10
@@ -935,6 +977,205 @@ function buildUpdaterOverlay() {
     exit 1
   fi
   printGreen "Built Updater overlay pointing the Updater at $url"
+}
+
+INTEGRITY_TOOLS_DIR='.tmp/integrity-tools'
+INTEGRITY_BUILD_DIR='.tmp/integrity'
+# The overlay and conf directories the integrity.py module reads. Fixed so the
+# avbroot call (patchOTAs) and buildIntegrityHook agree without passing paths.
+INTEGRITY_FRAMEWORK_OVERLAY="$INTEGRITY_BUILD_DIR/framework"
+INTEGRITY_CONF_DIR="$INTEGRITY_BUILD_DIR/conf"
+
+# Downloads the Play Integrity hook build tools, each verified by its pinned
+# SHA-256. r8.jar carries both d8 and R8; apktool-cli bundles smali/baksmali
+# 3.0.9 for the framework dex surgery; BouncyCastle is compiled into the hook
+# dex; android.jar is a compile-time library only.
+function downloadIntegrityTools() {
+  local dir="$INTEGRITY_TOOLS_DIR"
+  local mg='https://maven.google.com' mc='https://repo1.maven.org/maven2'
+  mkdir -p "$dir"
+  downloadVerifiedFile "$dir/r8.jar" \
+    "$mg/com/android/tools/r8/$R8_VERSION/r8-$R8_VERSION.jar" "$R8_SHA256"
+  downloadVerifiedFile "$dir/bcprov.jar" \
+    "$mc/org/bouncycastle/bcprov-jdk18on/$BOUNCYCASTLE_VERSION/bcprov-jdk18on-$BOUNCYCASTLE_VERSION.jar" \
+    "$BCPROV_SHA256"
+  downloadVerifiedFile "$dir/bcpkix.jar" \
+    "$mc/org/bouncycastle/bcpkix-jdk18on/$BOUNCYCASTLE_VERSION/bcpkix-jdk18on-$BOUNCYCASTLE_VERSION.jar" \
+    "$BCPKIX_SHA256"
+  downloadVerifiedFile "$dir/apktool.jar" \
+    "$mc/org/apktool/apktool-cli/$APKTOOL_VERSION/apktool-cli-$APKTOOL_VERSION.jar" "$APKTOOL_SHA256"
+  downloadVerifiedFile "$dir/android.jar" "$ANDROID_HOOK_JAR_URL" "$ANDROID_HOOK_JAR_SHA256"
+}
+
+# Maps a dex file's format version (its magic) to the smali/baksmali --api level
+# that reproduces it, so the reassembled dex keeps the stock container version.
+function dexApi() {
+  local ver
+  ver=$(dd if="$1" bs=1 skip=4 count=3 2>/dev/null)
+  case "$ver" in
+    035) echo 23 ;;
+    037) echo 24 ;;
+    038) echo 26 ;;
+    039) echo 28 ;;
+    040) echo 30 ;;
+    *) echo 34 ;;
+  esac
+}
+
+# Round-trips the one dex that holds AndroidKeyStoreSpi through baksmali, splices
+# in the hook call (insert_hook.py), reassembles it, and appends the hook dex as
+# the next classesN.dex. The patched jar replaces the one in the tree in place.
+function patchFrameworkJar() {
+  local jar="$1" hookDex="$2" apktool="$3" work="$4"
+  rm -rf "$work"
+  mkdir -p "$work/jar" "$work/smali"
+  (cd "$work/jar" && unzip -q "$jar")
+
+  local targetDex='' d
+  for d in "$work"/jar/classes*.dex; do
+    if java -cp "$apktool" com.android.tools.smali.baksmali.Main list classes "$d" 2>/dev/null \
+        | grep -qx 'Landroid/security/keystore2/AndroidKeyStoreSpi;'; then
+      targetDex="$d"
+      break
+    fi
+  done
+  if [[ -z "$targetDex" ]]; then
+    printRed 'AndroidKeyStoreSpi not found in any dex of framework.jar'
+    exit 1
+  fi
+  local api
+  api=$(dexApi "$targetDex")
+  print "AndroidKeyStoreSpi in $(basename "$targetDex") (dex api $api); splicing hook"
+
+  java -cp "$apktool" com.android.tools.smali.baksmali.Main disassemble -a "$api" "$targetDex" -o "$work/smali"
+  python3 -I integrity/insert_hook.py "$work/smali"
+  java -cp "$apktool" com.android.tools.smali.smali.Main assemble -a "$api" "$work/smali" -o "$targetDex"
+
+  local count
+  count=$(find "$work/jar" -maxdepth 1 -name 'classes*.dex' | wc -l)
+  cp "$hookDex" "$work/jar/classes$((count + 1)).dex"
+
+  # Repack: dexes stored uncompressed like a bootclasspath jar; keep any other
+  # entries exactly. Build to a temp name, then move over the tree's jar.
+  local out="$work/framework.jar"
+  rm -f "$out"
+  local others=()
+  mapfile -t others < <(cd "$work/jar" && find . -type f ! -name 'classes*.dex' -printf '%P\n')
+  (
+    cd "$work/jar"
+    zip -q -X -0 "$out" classes*.dex
+    if [[ ${#others[@]} -gt 0 ]]; then
+      zip -q -X -g "$out" "${others[@]}"
+    fi
+  )
+  mv "$out" "$jar"
+}
+
+# Writes /system/etc/playintegrity/config.json: which caller packages get a
+# spoofed chain, plus the optional signed-fetch pin material.
+function generateIntegrityConfig() {
+  local out="$1" pkgsJson args=() obj='{packages:$packages}'
+  pkgsJson=$(printf '%s' "$INTEGRITY_PACKAGES" | jq -R 'split(",") | map(select(length>0))')
+  args+=(--argjson packages "$pkgsJson")
+  if [[ -n "$INTEGRITY_KEYBOX_URL" ]]; then
+    args+=(--arg url "$INTEGRITY_KEYBOX_URL")
+    obj+='+{keyboxUrl:$url}'
+  fi
+  if [[ -n "$INTEGRITY_KEYBOX_SIGN_KEY" ]]; then
+    args+=(--arg sk "$INTEGRITY_KEYBOX_SIGN_KEY")
+    obj+='+{keyboxSignKey:$sk}'
+  fi
+  jq -n "${args[@]}" "$obj" > "$out"
+}
+
+# Writes /system/etc/playintegrity/root_of_trust.json. deviceLocked and
+# verifiedBootState are fixed to the strong state; the two byte values default
+# to 32 zero bytes unless supplied.
+function generateRootOfTrust() {
+  local out="$1" key="$INTEGRITY_VERIFIED_BOOT_KEY" hash="$INTEGRITY_VERIFIED_BOOT_HASH"
+  local zeros; zeros=$(printf '00%.0s' {1..32})
+  [[ -z "$key" ]] && key="$zeros"
+  [[ -z "$hash" ]] && hash="$zeros"
+  jq -n --arg k "$key" --arg h "$hash" \
+    '{verifiedBootKey:$k, verifiedBootHash:$h, deviceLocked:true, verifiedBootState:"VERIFIED"}' \
+    > "$out"
+}
+
+# Builds everything the integrity.py module needs: unpacks the stock system
+# image, builds the hook dex, splices it into framework.jar, rebuilds the boot
+# image from the patched jar (rebuildBootImage), and lays out the framework
+# overlay and the baked conf. Gated by INTEGRITY_PATCH in patchOTAs.
+function buildIntegrityHook() {
+  checkMandatoryVariable 'INTEGRITY_KEYBOX' 'OTA_TARGET'
+  if [[ ! -f "$INTEGRITY_KEYBOX" ]]; then
+    printRed "INTEGRITY_KEYBOX file not found: $INTEGRITY_KEYBOX"
+    exit 1
+  fi
+  local tool
+  for tool in java javac unzip zip; do
+    if ! command -v "$tool" >/dev/null; then
+      printRed "$tool is required for buildIntegrityHook"
+      exit 1
+    fi
+  done
+  downloadIntegrityTools
+
+  local root="$PWD"
+  local tools="$root/.tmp"
+  local build="$INTEGRITY_BUILD_DIR"
+  rm -rf "$build"
+  mkdir -p "$build/system/system" "$INTEGRITY_FRAMEWORK_OVERLAY" "$INTEGRITY_CONF_DIR"
+
+  # 1. Unpack the stock system image to a tree (same flow as verifyAPatchPartitions).
+  "$tools/avbroot" ota extract --input ".tmp/$OTA_TARGET.zip" \
+    --directory "$build/system" --partition system
+  (
+    cd "$build/system/system"
+    "$tools/avbroot" avb unpack --quiet --input ../system.img
+    "$tools/afsr" unpack --input raw.img
+  )
+  local fwDir="$root/$build/system/system/fs_tree/system/framework"
+  local jar="$fwDir/framework.jar"
+  if [[ ! -f "$jar" ]]; then
+    printRed "framework.jar not found at $jar"
+    exit 1
+  fi
+  cp "$jar" "$build/framework.stock.jar"
+
+  # 2. Build the hook dex (javac + R8), then splice it into framework.jar.
+  ANDROID_JAR="$root/$INTEGRITY_TOOLS_DIR/android.jar" \
+  R8_JAR="$root/$INTEGRITY_TOOLS_DIR/r8.jar" \
+  BC_JARS="$root/$INTEGRITY_TOOLS_DIR/bcprov.jar $root/$INTEGRITY_TOOLS_DIR/bcpkix.jar" \
+    bash integrity/build_hook.sh "$root/$build/hook.dex"
+  patchFrameworkJar "$jar" "$root/$build/hook.dex" "$root/$INTEGRITY_TOOLS_DIR/apktool.jar" "$root/$build/jarwork"
+
+  # 3. The check must pass on the patched jar and fail on the stock one.
+  python3 -I integrity/check_framework.py "$jar"
+  if python3 -I integrity/check_framework.py "$build/framework.stock.jar" >/dev/null 2>&1; then
+    printRed 'check_framework.py passed on the stock jar; the check is not discriminating'
+    exit 1
+  fi
+  print 'check_framework.py: patched jar passes, stock jar fails (as intended)'
+
+  # 4. Rebuild the boot image from the patched jar, in place in the tree.
+  rebuildBootImage "$root/$build/system/system/fs_tree"
+
+  # 5. Lay out the framework overlay (framework.jar + rebuilt boot image).
+  cp "$jar" "$INTEGRITY_FRAMEWORK_OVERLAY/framework.jar"
+  local b rel
+  while IFS= read -r -d '' b; do
+    rel="${b#"$fwDir"/}"
+    mkdir -p "$INTEGRITY_FRAMEWORK_OVERLAY/$(dirname "$rel")"
+    cp "$b" "$INTEGRITY_FRAMEWORK_OVERLAY/$rel"
+  done < <(find "$fwDir" -type f \
+    \( -name 'boot.art' -o -name 'boot.oat' -o -name 'boot.vdex' -o -name 'boot.bprof' \) -print0)
+
+  # 6. Bake the conf the hook reads at runtime.
+  cp "$INTEGRITY_KEYBOX" "$INTEGRITY_CONF_DIR/keybox.xml"
+  generateIntegrityConfig "$INTEGRITY_CONF_DIR/config.json"
+  generateRootOfTrust "$INTEGRITY_CONF_DIR/root_of_trust.json"
+
+  printGreen "Built integrity hook: patched framework.jar, rebuilt boot image, baked conf"
 }
 
 function patchOTAs() {
