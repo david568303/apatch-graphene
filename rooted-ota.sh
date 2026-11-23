@@ -1035,18 +1035,17 @@ function downloadIntegrityTools() {
   downloadVerifiedFile "$dir/android.jar" "$ANDROID_HOOK_JAR_URL" "$ANDROID_HOOK_JAR_SHA256"
 }
 
-# Maps a dex file's format version (its magic) to the smali/baksmali --api level
-# that reproduces it, so the reassembled dex keeps the stock container version.
-function dexApi() {
+# The smali/baksmali --api that reproduces a dex's container version, floored at
+# 29 so the framework's hidden-API flags round-trip (smali rejects them below 29)
+# and capped by what smali 3.0.9 can emit. Keeping the stock version (039) means
+# the device's ART accepts the patched dex exactly as it did the stock one.
+function smaliApi() {
   local ver
   ver=$(dd if="$1" bs=1 skip=4 count=3 2>/dev/null)
   case "$ver" in
-    035) echo 23 ;;
-    037) echo 24 ;;
-    038) echo 26 ;;
-    039) echo 28 ;;
-    040) echo 30 ;;
-    *) echo 34 ;;
+    040) echo 34 ;;
+    041) echo 35 ;;
+    *) echo 29 ;; # 035-039 and anything unexpected -> 039-producing, >=29
   esac
 }
 
@@ -1072,8 +1071,8 @@ function patchFrameworkJar() {
     exit 1
   fi
   local api
-  api=$(dexApi "$targetDex")
-  print "AndroidKeyStoreSpi in $(basename "$targetDex") (dex api $api); splicing hook"
+  api=$(smaliApi "$targetDex")
+  print "AndroidKeyStoreSpi in $(basename "$targetDex") (smali api $api); splicing hook"
 
   java -cp "$apktool" com.android.tools.smali.baksmali.Main disassemble -a "$api" "$targetDex" -o "$work/smali"
   python3 -I integrity/insert_hook.py "$work/smali"
