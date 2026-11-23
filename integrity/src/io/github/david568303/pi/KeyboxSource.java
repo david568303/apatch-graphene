@@ -26,6 +26,9 @@ import org.json.JSONObject;
 /**
  * Chooses the keybox the provider reads, in order:
  *
+ *   0. /data/local/tmp/playintegrity/keybox.xml, if present -- a test override
+ *      pushed over adb that wins over everything else, so a keybox can be swapped
+ *      without reflashing,
  *   1. a cached file in the hosting (GMS) process's own data dir, if adopted,
  *   2. otherwise the baked /system/etc/playintegrity/keybox.xml.
  *
@@ -37,6 +40,11 @@ import org.json.JSONObject;
  * A rejected fetch keeps the current box: the source never regresses.
  */
 final class KeyboxSource {
+    // adb-pushed test override: wins over the cache and the baked keybox so a
+    // keybox can be dropped in without reflashing. Readable only where the
+    // caller's SELinux domain is allowed into /data/local/tmp; otherwise the
+    // next source is used (the hook fails open on any read error).
+    private static final File ADB_OVERRIDE = new File("/data/local/tmp/playintegrity/keybox.xml");
     private static final File BAKED = new File(Config.DIR, "keybox.xml");
     private static final long REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000L;
     private static final long ATTEMPT_THROTTLE_MS = 60 * 1000L;
@@ -49,6 +57,9 @@ final class KeyboxSource {
     private KeyboxSource() {}
 
     static File activeFile() {
+        if (ADB_OVERRIDE.isFile() && ADB_OVERRIDE.length() > 0) {
+            return ADB_OVERRIDE; // test override takes precedence; no fetch
+        }
         File cache = cacheFile();
         File active = (cache != null && cache.isFile() && cache.length() > 0) ? cache : BAKED;
         maybeFetch();

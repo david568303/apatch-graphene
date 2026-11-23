@@ -94,8 +94,12 @@ INTEGRITY_PATCH=true INTEGRITY_KEYBOX=/path/to/keybox.xml \
 ```
 
 It is baked read-only to `/system/etc/playintegrity/keybox.xml` (world-readable
-by design — the private keys in a keybox are not a secret the OS keeps). Two
-small files are generated next to it:
+by design — the private keys in a keybox are not a secret the OS keeps). For
+testing, a keybox pushed over adb to `/data/local/tmp/playintegrity/keybox.xml`
+takes precedence over the baked one (and the cache), so you can swap keyboxes
+without reflashing; it is read only where the caller's SELinux domain can reach
+`/data/local/tmp`, and the hook falls back to the baked keybox otherwise. Two
+small files are generated next to the baked keybox:
 
 * `config.json` — which caller packages get a spoofed chain
   (`INTEGRITY_PACKAGES`, default `com.google.android.gms`), plus the optional
