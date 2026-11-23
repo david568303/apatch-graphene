@@ -68,12 +68,14 @@ GrapheneOS over the air updates (OTAs) patched with KernelPatch allowing for AVB
 Setting `INTEGRITY_PATCH=true` bakes a rootless Play Integrity hook into the
 system image of the OTA. There is no Magisk, no APatch, no module, no init
 service and no SELinux policy: the hook rides in `framework.jar` (a single call
-spliced into `AndroidKeyStoreSpi`), the boot image is rebuilt from the edited
-jar so the AOT image matches, and everything lands through the same avbroot
-module mechanism this repo already uses. `verifyAPatchPartitions` proves the
-system partition is stock apart from exactly `framework.jar`, the boot image and
-a new `/system/etc/playintegrity` directory. A relocked bootloader on the
-local AVB key is what makes the attestation claims (`verifiedBootState=VERIFIED`,
+spliced into `AndroidKeyStoreSpi`), the stale preopted boot image is deleted so
+the device's own `odrefresh` rebuilds it from the patched boot classpath with
+the OTA's `dex2oat` on first boot (the first boot is therefore slower), and
+everything lands through the same avbroot module mechanism this repo already
+uses. `verifyAPatchPartitions` proves the system partition is stock apart from
+exactly `framework.jar`, the removed boot image artifacts and a new
+`/system/etc/playintegrity` directory. A relocked bootloader on the local AVB
+key is what makes the attestation claims (`verifiedBootState=VERIFIED`,
 `deviceLocked=true`) coherent.
 
 > [!CAUTION]

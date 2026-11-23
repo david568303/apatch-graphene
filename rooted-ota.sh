@@ -822,7 +822,8 @@ function verifyAPatchOta() {
 # key could not boot). For the apatch flavor: the one new
 # /product/overlay/UpdaterOverlay.apk (the APK we built, over a stock Updater it
 # can actually override). For an integrity build (INTEGRITY_PATCH): framework.jar
-# and the boot image artifacts (boot.art/oat/vdex/bprof) differ, and one new
+# differs, every stale preopt boot image artifact (boot*.{art,oat,vdex,bprof} and
+# its .fsv_meta) under /system/framework is removed, and one new
 # /system/etc/playintegrity directory -- and the packed framework.jar must pass
 # check_framework.py. Anything else differing means a module or patch is still
 # writing where it should not.
@@ -860,18 +861,13 @@ function verifyAPatchPartitions() {
     cmp "$dir/patched/product/fs_tree/overlay/UpdaterOverlay.apk" .tmp/updater-overlay.apk
   fi
 
-  # The integrity hook: framework.jar and the boot image it feeds differ, and
-  # one new /system/etc/playintegrity directory. Nothing else.
+  # The integrity hook: framework.jar differs (the hook is spliced in) and one
+  # new /system/etc/playintegrity directory. The stale preopt boot image is
+  # deleted wholesale under /system/framework (odrefresh rebuilds it on device);
+  # those deletions are allowed by the extra filter below, nothing else.
   if [[ "$INTEGRITY_PATCH" == 'true' ]]; then
-    local s="$dir/stock/system/fs_tree/system/framework"
     local p="$dir/patched/system/fs_tree/system/framework"
-    expected+=("Files $s/framework.jar and $p/framework.jar differ")
-    local bootFile rel
-    while IFS= read -r -d '' bootFile; do
-      rel="${bootFile#"$s"/}"
-      expected+=("Files $s/$rel and $p/$rel differ")
-    done < <(find "$s" -type f \
-      \( -name 'boot.art' -o -name 'boot.oat' -o -name 'boot.vdex' -o -name 'boot.bprof' \) -print0)
+    expected+=("Files $dir/stock/system/fs_tree/system/framework/framework.jar and $p/framework.jar differ")
     expected+=("Only in $dir/patched/system/fs_tree/system/etc: playintegrity")
     # The packed jar in the patched OTA must be the hook-patched one, not stock.
     python3 -I integrity/check_framework.py "$p/framework.jar"
@@ -883,6 +879,12 @@ function verifyAPatchPartitions() {
     differences+=$'\n'
   done
   differences=$(grep -v -F -x -f <(printf '%s\n' "${expected[@]}" '') <<<"$differences" || true)
+  if [[ "$INTEGRITY_PATCH" == 'true' ]]; then
+    # Allow the removal of every stale boot image artifact -- boot*.{art,oat,vdex,
+    # bprof} and their .fsv_meta under /system/framework[/arm64], and the emptied
+    # arm64 directory -- but nothing else under framework.
+    differences=$(grep -vE '^Only in .*/stock/system/fs_tree/system/framework(/arm64)?: (boot[^ ]*\.(art|oat|vdex|bprof)(\.fsv_meta)?|arm64)$' <<<"$differences" || true)
+  fi
   rm -rf "$dir"
 
   if [[ -n "$differences" ]]; then
@@ -1128,172 +1130,11 @@ function generateRootOfTrust() {
     > "$out"
 }
 
-# Instruction set of the boot image to rebuild. The Pixel devices this repo
-# targets are all arm64.
-INTEGRITY_ISA=${INTEGRITY_ISA:-'arm64'}
-
-# Extracts an APEX's payload (bin + lib64 + javalib) into destDir. Handles both
-# the plain .apex (a zip holding apex_payload.img, an ext4 image) and the
-# compressed .capex (a zip holding original_apex, itself a .apex). The ext4
-# payload is read with debugfs so no loop mount / privileged container is
-# needed.
-function extractApex() {
-  local systemDir="$1" name="$2" destDir="$3"
-  local apexDir="$systemDir/apex"
-  local src=''
-  if [[ -f "$apexDir/$name.apex" ]]; then
-    src="$apexDir/$name.apex"
-  elif [[ -f "$apexDir/$name.capex" ]]; then
-    src="$apexDir/$name.capex"
-  else
-    printRed "APEX not found: $name(.apex|.capex) under $apexDir"
-    return 1
-  fi
-
-  local work; work=$(mktemp -d)
-  local apex="$src"
-  if [[ "$src" == *.capex ]]; then
-    unzip -q -o "$src" original_apex -d "$work"
-    apex="$work/original_apex"
-  fi
-  unzip -q -o "$apex" apex_payload.img -d "$work"
-
-  mkdir -p "$destDir"
-  if ! command -v debugfs >/dev/null; then
-    printRed 'debugfs (e2fsprogs) is required to extract APEX payloads'
-    rm -rf "$work"
-    return 1
-  fi
-  # rdump the three trees dex2oat needs; missing ones in a given apex are fine.
-  local d
-  for d in bin lib64 javalib etc; do
-    debugfs -R "rdump /$d $destDir" "$work/apex_payload.img" >/dev/null 2>&1 || true
-  done
-  rm -rf "$work"
-  [[ -d "$destDir/javalib" || -d "$destDir/bin" ]]
-}
-
-# Prints the colon-separated boot classpath, in order. Prefers the exported
-# BOOTCLASSPATH from the stock init rc; falls back to the jar paths interned in
-# /system/etc/classpaths/bootclasspath.pb (their file order is the bcp order).
-function parseBootclasspath() {
-  local systemDir="$1" rc bcp=''
-  for rc in "$systemDir/etc/init/hw/init.rc" "$systemDir"/etc/init/*.rc; do
-    [[ -f "$rc" ]] || continue
-    bcp=$(sed -nE 's/^[[:space:]]*export[[:space:]]+BOOTCLASSPATH[[:space:]]+//p' "$rc" | head -n1)
-    [[ -n "$bcp" ]] && { echo "$bcp"; return 0; }
-  done
-  local pb="$systemDir/etc/classpaths/bootclasspath.pb"
-  if [[ -f "$pb" ]]; then
-    bcp=$(strings -n 4 "$pb" | grep -E '^/(system|system_ext|apex)/.*\.jar$' | paste -sd ':' -)
-    [[ -n "$bcp" ]] && { echo "$bcp"; return 0; }
-  fi
-  return 1
-}
-
-# Rebuilds the /system/framework/<isa>/boot.{art,oat,vdex,bprof} AOT image from
-# the (patched) boot classpath, so the shipped image matches the edited
-# bytecode. dex2oat and the runtime come out of the OTA's own com.android.art
-# module; it runs under qemu-aarch64 in a chroot of the system tree, with the
-# stock compiler filter and /system/etc/boot-image.prof when present. Any
-# failure aborts the build rather than shipping a stale or broken boot image.
-function rebuildBootImage() {
-  local tree="$1" # fs_tree: holds system/ (system-as-root)
-  local isa="$INTEGRITY_ISA"
-  local qemu; qemu=$(command -v qemu-aarch64-static) || {
-    printRed 'qemu-aarch64-static is required (apt install qemu-user-static binfmt-support)'
-    exit 1
-  }
-
-  local chroot="$INTEGRITY_BUILD_DIR/chroot"
-  rm -rf "$chroot"
-  mkdir -p "$chroot/apex"
-  cp -a "$tree/system" "$chroot/system"
-
-  # The boot classpath spans these apexes plus /system; dex2oat needs their dex.
-  local apexName
-  for apexName in com.android.art com.android.i18n com.android.conscrypt; do
-    if ! extractApex "$tree/system" "$apexName" "$chroot/apex/$apexName"; then
-      printRed "Boot image rebuild: could not extract $apexName"
-      exit 1
-    fi
-  done
-
-  local dex2oat='/apex/com.android.art/bin/dex2oat64'
-  [[ -f "$chroot$dex2oat" ]] || dex2oat='/apex/com.android.art/bin/dex2oat'
-  if [[ ! -f "$chroot$dex2oat" ]]; then
-    printRed 'dex2oat not found in the com.android.art module'
-    exit 1
-  fi
-  chmod +x "$chroot/apex/com.android.art/bin/"* 2>/dev/null || true
-
-  local bcp
-  if ! bcp=$(parseBootclasspath "$tree/system"); then
-    printRed 'Could not determine BOOTCLASSPATH for the boot image rebuild'
-    exit 1
-  fi
-  local -a bcpArr
-  IFS=':' read -r -a bcpArr <<< "$bcp"
-
-  local prof='/system/etc/boot-image.prof' filter='speed-profile'
-  if [[ ! -f "$chroot$prof" ]]; then
-    filter='speed'
-    prof=''
-  fi
-
-  # qemu-aarch64-static is a static x86-64 binary: copied into the chroot it
-  # runs the aarch64 dex2oat with every file path resolved inside the chroot,
-  # so no binfmt_misc registration (and no privileged host) is needed.
-  local qemuName; qemuName=$(basename "$qemu")
-  cp "$qemu" "$chroot/$qemuName"
-  chmod +x "$chroot/$qemuName"
-
-  local outDir="/system/framework/$isa"
-  mkdir -p "$chroot$outDir"
-
-  local -a args=('--runtime-arg' "-Xbootclasspath:$bcp" '--runtime-arg' "-Xbootclasspath-locations:$bcp")
-  local j
-  for j in "${bcpArr[@]}"; do
-    args+=("--dex-file=$j" "--dex-location=$j")
-  done
-  args+=(
-    "--image=$outDir/boot.art"
-    "--oat-file=$outDir/boot.oat"
-    "--instruction-set=$isa"
-    "--compiler-filter=$filter"
-    '--base=0x70000000'
-    '--android-root=/system'
-    '--no-generate-debug-info'
-    '--runtime-arg' '-Xms64m' '--runtime-arg' '-Xmx512m'
-    '--boot-image=/nonexistent'
-  )
-  [[ -n "$prof" ]] && args+=("--profile-file=$prof")
-
-  print "Rebuilding boot image under qemu-aarch64 (isa=$isa, filter=$filter, ${#bcpArr[@]} bcp jars)"
-  if ! chroot "$chroot" "/$qemuName" "$dex2oat" "${args[@]}"; then
-    printRed 'dex2oat failed to rebuild the boot image'
-    exit 1
-  fi
-
-  # The runtime also reads a boot profile next to the image; reconstruct it from
-  # the stock boot-image.prof the compile used.
-  if [[ -n "$prof" && -f "$chroot$prof" ]]; then
-    cp "$chroot$prof" "$chroot$outDir/boot.bprof"
-  fi
-
-  # Copy the rebuilt artifacts back into the real tree for the overlay.
-  mkdir -p "$tree/system/framework/$isa"
-  cp "$chroot$outDir"/boot.art "$chroot$outDir"/boot.oat "$chroot$outDir"/boot.vdex \
-    "$tree/system/framework/$isa/"
-  [[ -f "$chroot$outDir/boot.bprof" ]] && cp "$chroot$outDir/boot.bprof" "$tree/system/framework/$isa/"
-
-  printGreen "Rebuilt boot image: $(ls -1 "$tree/system/framework/$isa"/boot.* | tr '\n' ' ')"
-}
-
 # Builds everything the integrity.py module needs: unpacks the stock system
-# image, builds the hook dex, splices it into framework.jar, rebuilds the boot
-# image from the patched jar (rebuildBootImage), and lays out the framework
-# overlay and the baked conf. Gated by INTEGRITY_PATCH in patchOTAs.
+# image, builds the hook dex, splices it into framework.jar, runs check_framework,
+# and lays out the patched framework.jar plus the baked conf. The boot image is
+# not rebuilt here (the module deletes the stale preopt; odrefresh rebuilds it on
+# device). Gated by INTEGRITY_PATCH in patchOTAs.
 function buildIntegrityHook() {
   checkMandatoryVariable 'INTEGRITY_KEYBOX' 'OTA_TARGET'
   if [[ ! -f "$INTEGRITY_KEYBOX" ]]; then
@@ -1346,25 +1187,21 @@ function buildIntegrityHook() {
   fi
   print 'check_framework.py: patched jar passes, stock jar fails (as intended)'
 
-  # 4. Rebuild the boot image from the patched jar, in place in the tree.
-  rebuildBootImage "$root/$build/system/system/fs_tree"
-
-  # 5. Lay out the framework overlay (framework.jar + rebuilt boot image).
+  # 4. The overlay the module writes is just the patched framework.jar. The boot
+  # image is not rebuilt offline: on the real target it is a ~15-component,
+  # fs-verity-protected split image whose .fsv_meta cannot be re-signed without
+  # GrapheneOS's key, and the device regenerates it into /data at runtime anyway.
+  # integrity.py deletes the stale preopt and ART's odrefresh rebuilds a clean
+  # image from the patched boot classpath with the OTA's own dex2oat on first
+  # boot. (See the build report for the deviation from the 4-file premise.)
   cp "$jar" "$INTEGRITY_FRAMEWORK_OVERLAY/framework.jar"
-  local b rel
-  while IFS= read -r -d '' b; do
-    rel="${b#"$fwDir"/}"
-    mkdir -p "$INTEGRITY_FRAMEWORK_OVERLAY/$(dirname "$rel")"
-    cp "$b" "$INTEGRITY_FRAMEWORK_OVERLAY/$rel"
-  done < <(find "$fwDir" -type f \
-    \( -name 'boot.art' -o -name 'boot.oat' -o -name 'boot.vdex' -o -name 'boot.bprof' \) -print0)
 
-  # 6. Bake the conf the hook reads at runtime.
+  # 5. Bake the conf the hook reads at runtime.
   cp "$INTEGRITY_KEYBOX" "$INTEGRITY_CONF_DIR/keybox.xml"
   generateIntegrityConfig "$INTEGRITY_CONF_DIR/config.json"
   generateRootOfTrust "$INTEGRITY_CONF_DIR/root_of_trust.json"
 
-  printGreen "Built integrity hook: patched framework.jar, rebuilt boot image, baked conf"
+  printGreen "Built integrity hook: patched framework.jar + baked conf (boot image regenerates on device)"
 }
 
 function patchOTAs() {
