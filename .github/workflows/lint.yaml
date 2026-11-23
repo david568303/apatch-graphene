@@ -7,11 +7,15 @@ on:
     branches: ['*']
     paths:
       - rooted-ota.sh
+      - patch-modules/**
+      - integrity/**
       - .github/workflows/**
   pull_request:
     types: [synchronize, opened, reopened]
     paths:
       - rooted-ota.sh
+      - patch-modules/**
+      - integrity/**
       - .github/workflows/**
   workflow_dispatch:
 

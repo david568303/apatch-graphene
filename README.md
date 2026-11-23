@@ -63,6 +63,69 @@ GrapheneOS over the air updates (OTAs) patched with KernelPatch allowing for AVB
 
 
 
+### Play Integrity (strong integrity)
+
+Setting `INTEGRITY_PATCH=true` bakes a rootless Play Integrity hook into the
+system image of the OTA. There is no Magisk, no APatch, no module, no init
+service and no SELinux policy: the hook rides in `framework.jar` (a single call
+spliced into `AndroidKeyStoreSpi`), the boot image is rebuilt from the edited
+jar so the AOT image matches, and everything lands through the same avbroot
+module mechanism this repo already uses. `verifyAPatchPartitions` proves the
+system partition is stock apart from exactly `framework.jar`, the boot image and
+a new `/system/etc/playintegrity` directory. A relocked bootloader on the
+local AVB key is what makes the attestation claims (`verifiedBootState=VERIFIED`,
+`deviceLocked=true`) coherent.
+
+> [!CAUTION]
+> Play Integrity spoofing is revocable by Google and **expected to break**. A
+> keybox can be banned at any time; treat it as disposable and keep the rest of
+> the build working without it.
+
+#### The per-build keybox
+
+The keybox never lives in this repo. Point `INTEGRITY_KEYBOX` at a standard
+`AndroidAttestation` keybox XML (RSA + ECDSA) for the build:
+
+```shell
+INTEGRITY_PATCH=true INTEGRITY_KEYBOX=/path/to/keybox.xml \
+  DEVICE_ID=mustang ./rooted-ota.sh
+```
+
+It is baked read-only to `/system/etc/playintegrity/keybox.xml` (world-readable
+by design — the private keys in a keybox are not a secret the OS keeps). Two
+small files are generated next to it:
+
+* `config.json` — which caller packages get a spoofed chain
+  (`INTEGRITY_PACKAGES`, default `com.google.android.gms`), plus the optional
+  fetch/pin material below.
+* `root_of_trust.json` — the `verifiedBootKey` / `verifiedBootHash` the leaf
+  attests to (`INTEGRITY_VERIFIED_BOOT_KEY` / `INTEGRITY_VERIFIED_BOOT_HASH`,
+  hex or base64, default 32 zero bytes); `deviceLocked` and `verifiedBootState`
+  are fixed to the strong state.
+
+On device the hook re-reads these by mtime, so dropping a new keybox or config
+takes effect without a reboot.
+
+#### Rotation and revocation
+
+To rotate the keybox after shipping — e.g. once the baked one is burned — host
+an Ed25519-signed bundle and bake its coordinates in:
+
+* `INTEGRITY_KEYBOX_URL` — where the hook fetches the bundle
+  (`{"keybox":"<base64 xml>","sig":"<base64 Ed25519 over the xml>"}`).
+* `INTEGRITY_KEYBOX_SIGN_KEY` — the base64 public half that must sign it.
+
+The fetch is a background, one-at-a-time daemon that never runs on the
+attestation path, caches into the hosting app's own data dir, and **never
+regresses**: a fetched keybox is adopted only if its signature verifies and the
+keybox then validates — it parses, carries both RSA and ECDSA, each chain is
+internally consistent and (when roots are pinned via `googleRoots` in
+`config.json`) terminates at a pinned Google root, nothing is expired, and no
+certificate serial appears on the revocation list (`revokedSerials` in
+`config.json`, plus any cached list). A rejected fetch keeps the current box, so
+a banned or malformed keybox can never downgrade a working one.
+
 ### Credits
 [schatterer](https://github.com/schnatterer)
 And the rest of contributors of [rooted-graphene](https://github.com/schnatterer/rooted-graphene)
+Keybox chain generation ported from [UN1CA](https://github.com/salvogiangri/UN1CA) (GPL-3.0).
