@@ -13,12 +13,14 @@ name: Release integrity test OTA
 # reads ahead of the baked one.
 
 on:
-  # Triggered by pushing the ci-integrity-test tag, so it runs from this feature
-  # branch without the workflow needing to be on the default branch (which
-  # workflow_dispatch would require). workflow_dispatch is also declared for once
-  # this lands on the default branch.
+  # Runs from this feature branch (the workflow need not be on the default
+  # branch, which workflow_dispatch would require). Scoped to a push that touches
+  # this file on integrity-hook, so it fires once when kicked and not on
+  # unrelated commits; re-touch this file to re-run. workflow_dispatch is also
+  # declared for once this lands on the default branch.
   push:
-    tags: ['ci-integrity-test']
+    branches: [integrity-hook]
+    paths: ['.github/workflows/release-integrity-test.yaml']
   workflow_dispatch:
     inputs:
       device-id:
