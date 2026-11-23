@@ -816,12 +816,16 @@ function verifyAPatchOta() {
 }
 
 # Fails unless the patched OTA's filesystems are identical to the stock ones
-# apart from the intended changes: /system/etc/security/otacerts.zip, which
-# avbroot replaces on purpose (it makes the on-device updater reject official
-# GrapheneOS OTAs, which a bootloader locked to our AVB key could not boot), and,
-# the one new /product/overlay/UpdaterOverlay.apk (which must
-# be the APK we built, over a stock Updater it can actually override). Anything
-# else differing means a module or patch is still writing where it should not.
+# apart from the intended changes. Always allowed: /system/etc/security/
+# otacerts.zip, which avbroot replaces on purpose (it makes the on-device
+# updater reject official GrapheneOS OTAs, which a bootloader locked to our AVB
+# key could not boot). For the apatch flavor: the one new
+# /product/overlay/UpdaterOverlay.apk (the APK we built, over a stock Updater it
+# can actually override). For an integrity build (INTEGRITY_PATCH): framework.jar
+# and the boot image artifacts (boot.art/oat/vdex/bprof) differ, and one new
+# /system/etc/playintegrity directory -- and the packed framework.jar must pass
+# check_framework.py. Anything else differing means a module or patch is still
+# writing where it should not.
 function verifyAPatchPartitions() {
   local otaFile="$1"
   local tools="$PWD/.tmp"
@@ -844,10 +848,34 @@ function verifyAPatchPartitions() {
     done
   done
 
-  expected=("Files $dir/stock/system/fs_tree/system/etc/security/otacerts.zip and $dir/patched/system/fs_tree/system/etc/security/otacerts.zip differ"
-    "Only in $dir/patched/product/fs_tree/overlay: UpdaterOverlay.apk")
-  python3 -I updater-overlay/check_target.py "$dir/stock/system/fs_tree/system/priv-app/Updater/Updater.apk"
-  cmp "$dir/patched/product/fs_tree/overlay/UpdaterOverlay.apk" .tmp/updater-overlay.apk
+  # avbroot always rewrites otacerts.zip; everything else is allowed only for the
+  # change that actually produced it.
+  expected=("Files $dir/stock/system/fs_tree/system/etc/security/otacerts.zip and $dir/patched/system/fs_tree/system/etc/security/otacerts.zip differ")
+
+  # The Updater overlay (apatch flavor): one new APK in /product/overlay, which
+  # must be the one we built over a stock Updater it can actually override.
+  if [[ -f .tmp/updater-overlay.apk ]]; then
+    expected+=("Only in $dir/patched/product/fs_tree/overlay: UpdaterOverlay.apk")
+    python3 -I updater-overlay/check_target.py "$dir/stock/system/fs_tree/system/priv-app/Updater/Updater.apk"
+    cmp "$dir/patched/product/fs_tree/overlay/UpdaterOverlay.apk" .tmp/updater-overlay.apk
+  fi
+
+  # The integrity hook: framework.jar and the boot image it feeds differ, and
+  # one new /system/etc/playintegrity directory. Nothing else.
+  if [[ "$INTEGRITY_PATCH" == 'true' ]]; then
+    local s="$dir/stock/system/fs_tree/system/framework"
+    local p="$dir/patched/system/fs_tree/system/framework"
+    expected+=("Files $s/framework.jar and $p/framework.jar differ")
+    local bootFile rel
+    while IFS= read -r -d '' bootFile; do
+      rel="${bootFile#"$s"/}"
+      expected+=("Files $s/$rel and $p/$rel differ")
+    done < <(find "$s" -type f \
+      \( -name 'boot.art' -o -name 'boot.oat' -o -name 'boot.vdex' -o -name 'boot.bprof' \) -print0)
+    expected+=("Only in $dir/patched/system/fs_tree/system/etc: playintegrity")
+    # The packed jar in the patched OTA must be the hook-patched one, not stock.
+    python3 -I integrity/check_framework.py "$p/framework.jar"
+  fi
 
   local differences=''
   for part in "${partitions[@]}"; do
@@ -1452,9 +1480,12 @@ function patchOTAs() {
     fi
 
     # Also for a file that was already there: whatever gets released is verified.
-    if [[ "$flavor" == 'apatch' ]]; then
+    # The apatch flavor and any integrity build are both proved to change the
+    # partitions by no more than intended; verifyAPatchOta (KernelPatch in boot)
+    # applies to apatch only.
+    if [[ "$flavor" == 'apatch' || "$INTEGRITY_PATCH" == 'true' ]]; then
       verifyReleaseCandidate "$targetFile"
-      verifyAPatchOta "$targetFile"
+      [[ "$flavor" == 'apatch' ]] && verifyAPatchOta "$targetFile"
       verifyAPatchPartitions "$targetFile"
     fi
   done
