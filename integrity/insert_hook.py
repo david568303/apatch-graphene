@@ -40,7 +40,7 @@ LABEL = ":pihook_orig"
 # engineGetCertificateChain(String) is an instance method: p0=this, p1=alias -> 2 param registers.
 PARAM_REGS = 2
 
-# TEE / StrongBox spoof targets: (relative smali path, method signature, hook descriptor)
+# TEE / StrongBox spoof targets: (relative smali path from smali root, method signature, hook descriptor)
 TEE_HOOK_SPECS = [
     (
         "android/security/keystore/KeyInfo.smali",
@@ -300,7 +300,7 @@ def main(arg):
           f"new local v{new_local})")
 
     # === TEE / StrongBox spoof hooks ===
-    splice_tee_hooks(target.parent.parent)
+    splice_tee_hooks(target.parent.parent.parent)
 
 
 if __name__ == "__main__":
