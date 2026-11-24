@@ -179,6 +179,113 @@ def main(arg):
           f"{old_locals + PARAM_REGS + 1 if kind == 'registers' else old_locals + 1}, "
           f"new local v{new_local})")
 
+def splice_tee_hooks(target: pathlib.Path) -> None:
+    """Splice Hooks.isInsideSecureHardware / Hooks.getSecurityLevel into
+    KeyInfo and KeyCharacteristics so Play Integrity sees hardware TEE."""
+    text = target.read_text(encoding="utf-8")
+
+    # (method_regex, hook_descriptor, register, return_opcode, return_const, label)
+    TEE_HOOKS = [
+        (
+            r"^\s*\.method\b.*\bisInsideSecureHardware\(\)Z\s*$",
+            "Lio/github/david568303/pi/Hooks;->isInsideSecureHardware()Z",
+            "p0",
+            "return-boolean",
+            "const/4 v{new_local}, 0x1",
+            ":tee_orig",
+        ),
+        (
+            r"^\s*\.method\b.*\bgetSecurityLevel\(\)I\s*$",
+            "Lio/github/david568303/pi/Hooks;->getSecurityLevel()I",
+            "p0",
+            "return",
+            "const/4 v{new_local}, 0x2",
+            ":tee_orig",
+        ),
+    ]
+
+    for method_re, hook_desc, reg, ret_op, ret_const, label in TEE_HOOKS:
+        starts = [i for i, ln in enumerate(text.splitlines()) if re.compile(method_re).match(ln)]
+        if not starts:
+            continue  # method not in this file
+        lines = text.splitlines()
+        start = starts[0]
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].strip() == ".end method"), None)
+        if end is None:
+            continue
+
+        # Find .locals or .registers
+        loc_idx = None
+        old_locals = 0
+        kind = "locals"
+        for i in range(start + 1, end):
+            s = lines[i].strip()
+            if s.startswith(".locals "):
+                loc_idx = i
+                old_locals = int(s.split()[1])
+                kind = "locals"
+                break
+            if s.startswith(".registers "):
+                total = int(s.split()[1])
+                loc_idx = i
+                old_locals = total - 2  # p0=this, p1=arg for instance methods
+                kind = "registers"
+                break
+        if loc_idx is None:
+            continue
+
+        new_local = old_locals + 1
+
+        # Bump register count by 1
+        indent = lines[loc_idx][:len(lines[loc_idx]) - len(lines[loc_idx].lstrip())]
+        if kind == "registers":
+            lines[loc_idx] = f"{indent}.registers {old_locals + 2 + 1}"
+        else:
+            lines[loc_idx] = f"{indent}.locals {old_locals + 1}"
+
+        # Find first executable instruction
+        skippable = (".prologue", ".line", ".local", ".restart", ".end local", ".source")
+        i = loc_idx + 1
+        while i < end:
+            s = lines[i].strip()
+            if s == "" or s.startswith("#"):
+                i += 1
+                continue
+            if s.startswith(".param"):
+                i += 1
+                while i < end and lines[i].strip() not in (".end param",):
+                    i += 1
+                i += 1
+                continue
+            if s.startswith(".annotation"):
+                while i < end and lines[i].strip() != ".end annotation":
+                    i += 1
+                i += 1
+                continue
+            if s.startswith(skippable):
+                i += 1
+                continue
+            break
+
+        ins_at = i
+        block = [
+            f"    invoke-virtual {{{reg}}}, {hook_desc}",
+            "",
+            f"    move-result v{new_local}",
+            "",
+            f"    if-eqz v{new_local}, {label}",
+            "",
+            f"    {ret_const}",
+            f"    {ret_op} v{new_local}",
+            "",
+            f"    {label}",
+        ]
+        lines[ins_at:ins_at] = block
+
+        out = "\n".join(lines)
+        if text.endswith("\n"):
+            out += "\n"
+        target.write_text(out, encoding="utf-8")
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
