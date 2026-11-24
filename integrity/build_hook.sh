@@ -14,7 +14,11 @@
 # Usage: build_hook.sh <output-dex>
 # Env:
 #   ANDROID_JAR  android.jar to compile/link against (library, not bundled)
-#   BC_JARS      space-separated BouncyCastle jars (bcprov + bcpkix), bundled
+#   BC_JARS      space-separated BouncyCastle jars (bcprov + bcpkix + bcutil),
+#                bundled. bcutil is required: bcpkix's cert/signer builders pull
+#                in its ASN.1 OID registries transitively, and a missing one
+#                only surfaces as a runtime NoClassDefFoundError (R8 cannot warn
+#                about it through hook.pro's -dontwarn org.bouncycastle.**).
 #   R8_JAR       r8.jar, providing com.android.tools.r8.R8
 #   MIN_API      optional dex min API level (default 34)
 

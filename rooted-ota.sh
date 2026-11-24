@@ -218,6 +218,12 @@ R8_SHA256=9743e95de295fb6f5490e21da26536e4d0921809511423122ff20328a572e7f5
 BOUNCYCASTLE_VERSION=1.78.1
 BCPROV_SHA256=add5915e6acfc6ab5836e1fd8a5e21c6488536a8c1f21f386eeb3bf280b702d7
 BCPKIX_SHA256=4b48ea084e5232b9d79ebca1887b9de037b124931807cd60710748c2aee08cc9
+# bcutil holds the ASN.1 OID registries (org.bouncycastle.asn1.oiw/cms/ntt/...)
+# that bcpkix's cert/signer builders pull in transitively. It is a declared
+# dependency of bcpkix-jdk18on and MUST be an R8 input too: without it those
+# classes are absent from the repackaged dex and the hook's BouncyCastle classes
+# die in <clinit> with NoClassDefFoundError on the bootclasspath at runtime.
+BCUTIL_SHA256=d9fa56f97b0f761ce3bc8d9d74c5d7137a987bf5bd3abfe1003f9bafa45a1d2f
 # renovate: datasource=maven packageName=org.apktool:apktool-cli
 APKTOOL_VERSION=2.11.1
 APKTOOL_SHA256=4920d21254ab9275d402f8cc30e5cef55a4e726c434daeaa487a238457efbfb5
@@ -1032,6 +1038,9 @@ function downloadIntegrityTools() {
   downloadVerifiedFile "$dir/bcpkix.jar" \
     "$mc/org/bouncycastle/bcpkix-jdk18on/$BOUNCYCASTLE_VERSION/bcpkix-jdk18on-$BOUNCYCASTLE_VERSION.jar" \
     "$BCPKIX_SHA256"
+  downloadVerifiedFile "$dir/bcutil.jar" \
+    "$mc/org/bouncycastle/bcutil-jdk18on/$BOUNCYCASTLE_VERSION/bcutil-jdk18on-$BOUNCYCASTLE_VERSION.jar" \
+    "$BCUTIL_SHA256"
   downloadVerifiedFile "$dir/apktool.jar" \
     "$mc/org/apktool/apktool-cli/$APKTOOL_VERSION/apktool-cli-$APKTOOL_VERSION.jar" "$APKTOOL_SHA256"
   downloadVerifiedFile "$dir/android.jar" "$ANDROID_HOOK_JAR_URL" "$ANDROID_HOOK_JAR_SHA256"
@@ -1175,7 +1184,7 @@ function buildIntegrityHook() {
   # 2. Build the hook dex (javac + R8), then splice it into framework.jar.
   ANDROID_JAR="$root/$INTEGRITY_TOOLS_DIR/android.jar" \
   R8_JAR="$root/$INTEGRITY_TOOLS_DIR/r8.jar" \
-  BC_JARS="$root/$INTEGRITY_TOOLS_DIR/bcprov.jar $root/$INTEGRITY_TOOLS_DIR/bcpkix.jar" \
+  BC_JARS="$root/$INTEGRITY_TOOLS_DIR/bcprov.jar $root/$INTEGRITY_TOOLS_DIR/bcpkix.jar $root/$INTEGRITY_TOOLS_DIR/bcutil.jar" \
     bash integrity/build_hook.sh "$root/$build/hook.dex"
   patchFrameworkJar "$jar" "$root/$build/hook.dex" "$root/$INTEGRITY_TOOLS_DIR/apktool.jar" "$root/$build/jarwork"
 
