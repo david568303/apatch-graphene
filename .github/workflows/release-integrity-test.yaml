@@ -11,6 +11,12 @@ name: APatch + Integrity test OTA
 # The baked keybox is a throwaway self-signed placeholder: the real keybox is
 # pushed on-device to /data/local/tmp/playintegrity/keybox.xml, which the hook
 # reads ahead of the baked one.
+#
+# The hook dex bundles BouncyCastle bcprov + bcpkix + bcutil (see rooted-ota.sh
+# downloadIntegrityTools / BC_JARS). bcutil is mandatory: bcpkix pulls its ASN.1
+# OID registries in transitively, and without it the repackaged BouncyCastle
+# classes fail <clinit> at runtime with NoClassDefFoundError on the
+# bootclasspath (p9/u5). This build must carry the bcutil fix (commit 43c9041+).
 
 on:
   # Runs from this feature branch (the workflow need not be on the default
