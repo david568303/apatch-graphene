@@ -1,4 +1,4 @@
-name: Release integrity test OTA
+name: APatch + Integrity test OTA
 
 # Builds a rootless + Play Integrity (INTEGRITY_PATCH) OTA for one device and
 # publishes it as a DEDICATED prerelease, NOT into the live rolling-ota-feed the
@@ -34,7 +34,7 @@ on:
       release-tag:
         description: Tag for the dedicated prerelease
         required: false
-        default: integrity-test
+        default: integrity-apatch-test
 
 permissions:
   contents: write
@@ -68,6 +68,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+
+      - name: Install Updater overlay build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends aapt apksigner libandroid-23-java
+          command -v aapt2
 
       - name: Generate a placeholder keybox
         # Throwaway self-signed EC+RSA keybox; the real one is pushed to
@@ -115,13 +121,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEVICE_ID: ${{ inputs.device-id || 'mustang' }}
-          TAG: ${{ inputs.release-tag || 'integrity-test' }}
+          TAG: ${{ inputs.release-tag || 'integrity-apatch-test' }}
         run: |
           set -e
           shopt -s nullglob
-          zips=(.tmp/patched/*-rootless*.zip)
-          zip="${zips[0]:-}"
-          [[ -n "$zip" && -f "$zip" ]] || { echo "no OTA produced" >&2; exit 1; }
+          zips=(.tmp/patched/"$DEVICE_ID"-ota_update-*.zip)
+          if (( ${#zips[@]} != 1 )); then
+            echo "Expected exactly one APatch OTA; found ${#zips[@]}" >&2
+            printf '%s\n' "${zips[@]}"
+            exit 1
+          fi
+          zip="${zips[0]}"
           base=$(basename "$zip")
           (cd .tmp/patched && sha256sum "$base" > "$base.sha256")
 
