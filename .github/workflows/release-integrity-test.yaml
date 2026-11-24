@@ -16,7 +16,7 @@ on:
   # Runs from this feature branch (the workflow need not be on the default
   # branch, which workflow_dispatch would require). Scoped to a push that touches
   # this file on integrity-hook, so it fires once when kicked and not on
-  # unrelated commits; # re-touch this file to re-run. PEM parser fix test. workflow_dispatch is also
+  # unrelated commits; # re-touch this file to build. workflow_dispatch is also
   # declared for once this lands on the default branch.
   push:
     branches: [integrity-hook]
