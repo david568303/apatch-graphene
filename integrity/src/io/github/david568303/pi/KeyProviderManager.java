@@ -125,7 +125,8 @@ final class KeyProviderManager {
                     } else if ("Certificate".equals(name) && algo != null) {
                         requirePem(xp, "Certificate");
                         X509Certificate c = (X509Certificate) cf.generateCertificate(
-                                new ByteArrayInputStream(xp.nextText().getBytes(StandardCharsets.UTF_8)));
+                                new ByteArrayInputStream(
+                                        canonicalPem(xp, "Certificate").getBytes(StandardCharsets.UTF_8)));
                         if ("EC".equals(algo)) {
                             ecChain.add(c);
                         } else if ("RSA".equals(algo)) {
@@ -157,6 +158,42 @@ final class KeyProviderManager {
             if (fmt != null && !"pem".equalsIgnoreCase(fmt)) {
                 throw new IllegalArgumentException("Unsupported " + what + " format: " + fmt);
             }
+        }
+
+        /**
+         * Rewrites an indented PEM block as canonical 64-column PEM.
+         *
+         * Keybox XML indents every line, which pushes base64 body lines past
+         * OpenSSL's 64-character limit; Conscrypt's CertificateFactory then
+         * fails with "PEM routines::OPENSSL_internal:BAD_END_LINE". The text
+         * node is consumed here, so callers must not call nextText() again.
+         */
+        private static String canonicalPem(XmlPullParser xp, String what) throws Exception {
+            String raw = xp.nextText();
+            int begin = raw.indexOf("-----BEGIN ");
+            if (begin < 0) {
+                throw new IllegalArgumentException("Missing BEGIN marker in " + what);
+            }
+            int labelEnd = raw.indexOf("-----", begin + 11);
+            if (labelEnd < 0) {
+                throw new IllegalArgumentException("Malformed BEGIN marker in " + what);
+            }
+            String label = raw.substring(begin + 11, labelEnd).trim();
+            String end = "-----END " + label + "-----";
+            int endAt = raw.indexOf(end, labelEnd + 5);
+            if (endAt < 0) {
+                throw new IllegalArgumentException("Missing \"" + end + "\" in " + what);
+            }
+            String body = raw.substring(labelEnd + 5, endAt).replaceAll("\\s+", "");
+            if (body.isEmpty()) {
+                throw new IllegalArgumentException("Empty " + what + " PEM body");
+            }
+            StringBuilder sb = new StringBuilder(body.length() + 64);
+            sb.append("-----BEGIN ").append(label).append("-----\n");
+            for (int i = 0; i < body.length(); i += 64) {
+                sb.append(body, i, Math.min(i + 64, body.length())).append('\n');
+            }
+            return sb.append(end).append('\n').toString();
         }
 
         private static PrivateKey parsePrivateKey(String pem) throws Exception {
