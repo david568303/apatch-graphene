@@ -160,7 +160,9 @@ final class KeyProviderManager {
         }
 
         private static PrivateKey parsePrivateKey(String pem) throws Exception {
-            try (PEMParser parser = new PEMParser(new StringReader(pem.trim()))) {
+            String normalizedPem = pem.replaceAll("(?m)^[\\t ]+", "").trim();
+
+            try (PEMParser parser = new PEMParser(new StringReader(normalizedPem))) {
                 Object o = parser.readObject();
                 JcaPEMKeyConverter conv = new JcaPEMKeyConverter();
                 if (o instanceof PEMKeyPair) {
