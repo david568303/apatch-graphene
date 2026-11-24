@@ -1,0 +1,184 @@
+name: APatch + Integrity test OTA
+
+# Builds a rootless + Play Integrity (INTEGRITY_PATCH) OTA for one device and
+# publishes it as a DEDICATED prerelease, NOT into the live rolling-ota-feed the
+# Updater polls. That isolation is deliberate: the feed serves one OTA per
+# device on every channel at once, so putting an experimental build there would
+# push it to stable too and overwrite the real APatch OTA. A dedicated prerelease
+# tag carries the OTA, its checksum, the alpha channel metadata and a loud
+# warning, and can't touch the APatch distribution.
+#
+# The baked keybox is a throwaway self-signed placeholder: the real keybox is
+# pushed on-device to /data/local/tmp/playintegrity/keybox.xml, which the hook
+# reads ahead of the baked one.
+#
+# The hook dex bundles BouncyCastle bcprov + bcpkix + bcutil (see rooted-ota.sh
+# downloadIntegrityTools / BC_JARS). bcutil is mandatory: bcpkix pulls its ASN.1
+# OID registries in transitively, and without it the repackaged BouncyCastle
+# classes fail <clinit> at runtime with NoClassDefFoundError on the
+# bootclasspath (p9/u5). This build must carry the bcutil fix (commit 43c9041+).
+
+on:
+  # Runs from this feature branch (the workflow need not be on the default
+  # branch, which workflow_dispatch would require). Scoped to a push that touches
+  # this file on integrity-hook, so it fires once when kicked and not on
+  # unrelated commits; # re-touch this file to run a build action. workflow_dispatch is also
+  # declared for once this lands on the default branch.
+  push:
+    branches: [integrity-hook]
+    paths: ['.github/workflows/release-integrity-test.yaml']
+  workflow_dispatch:
+    inputs:
+      device-id:
+        description: Device ID
+        required: true
+        default: mustang
+      ota-version:
+        description: GrapheneOS OTA version or latest
+        required: false
+        default: ''
+      release-tag:
+        description: Tag for the dedicated prerelease
+        required: false
+        default: integrity-apatch-test
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate signing secrets
+        env:
+          PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
+          PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
+          KEY_AVB_BASE64: ${{ secrets.KEY_AVB_BASE64 }}
+          KEY_OTA_BASE64: ${{ secrets.KEY_OTA_BASE64 }}
+          CERT_OTA_BASE64: ${{ secrets.CERT_OTA_BASE64 }}
+        run: |
+          missing=()
+          for name in PASSPHRASE_AVB PASSPHRASE_OTA KEY_AVB_BASE64 KEY_OTA_BASE64 CERT_OTA_BASE64; do
+            [[ -z "${!name}" ]] && missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required repository secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Set up JDK (for the hook javac + R8)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Updater overlay build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends aapt apksigner libandroid-23-java
+          command -v aapt2
+
+      - name: Generate a placeholder keybox
+        # Throwaway self-signed EC+RSA keybox; the real one is pushed to
+        # /data/local/tmp/playintegrity/keybox.xml on the device.
+        run: |
+          set -e
+          kb="$RUNNER_TEMP/keybox"; mkdir -p "$kb"; cd "$kb"
+          openssl ecparam -genkey -name prime256v1 -noout -out ec.key
+          openssl req -new -x509 -key ec.key -days 3650 -subj '/CN=Placeholder EC' -out ec.crt
+          openssl genrsa -out rsa.key 2048
+          openssl req -new -x509 -key rsa.key -days 3650 -subj '/CN=Placeholder RSA' -out rsa.crt
+          {
+            echo '<?xml version="1.0"?>'
+            echo '<AndroidAttestation><NumberOfKeyboxes>1</NumberOfKeyboxes><Keybox DeviceID="placeholder">'
+            echo '<Key algorithm="ecdsa"><PrivateKey format="pem">'; cat ec.key; echo '</PrivateKey>'
+            echo '<CertificateChain><NumberOfCertificates>1</NumberOfCertificates><Certificate format="pem">'; cat ec.crt
+            echo '</Certificate></CertificateChain></Key>'
+            echo '<Key algorithm="rsa"><PrivateKey format="pem">'; cat rsa.key; echo '</PrivateKey>'
+            echo '<CertificateChain><NumberOfCertificates>1</NumberOfCertificates><Certificate format="pem">'; cat rsa.crt
+            echo '</Certificate></CertificateChain></Key>'
+            echo '</Keybox></AndroidAttestation>'
+          } > keybox.xml
+          echo "INTEGRITY_KEYBOX=$kb/keybox.xml" >> "$GITHUB_ENV"
+
+      - name: Build the integrity OTA
+        env:
+          DEVICE_ID: ${{ inputs.device-id || 'mustang' }}
+          OTA_VERSION: ${{ inputs.ota-version || '' }}
+          SKIP_APATCH: 'false'
+          SKIP_ROOTLESS: 'true'
+          INTEGRITY_PATCH: 'true'
+          FORCE_BUILD: 'true'
+          SKIP_CLEANUP: 'true'
+          NO_COLOR: '1'
+          GITHUB_REPO: ${{ github.repository }}
+          FEED_TAG: ${{ inputs.release-tag || 'integrity-apatch-test' }}
+          PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
+          PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
+          KEY_AVB_BASE64: ${{ secrets.KEY_AVB_BASE64 }}
+          KEY_OTA_BASE64: ${{ secrets.KEY_OTA_BASE64 }}
+          CERT_OTA_BASE64: ${{ secrets.CERT_OTA_BASE64 }}
+        run: bash -c '. rooted-ota.sh && createRootedOta'
+
+      - name: Upload R8 diagnostic files
+        uses: actions/upload-artifact@v7
+        with:
+          name: r8-diagnostics-${{ github.run_id }}
+          path: |
+            .tmp/integrity/mapping.txt
+            .tmp/integrity/hook.dex
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish the dedicated prerelease (alpha)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEVICE_ID: ${{ inputs.device-id || 'mustang' }}
+          TAG: ${{ inputs.release-tag || 'integrity-apatch-test' }}
+        run: |
+          set -e
+          shopt -s nullglob
+          zips=(.tmp/patched/"$DEVICE_ID"-ota_update-*.zip)
+          if (( ${#zips[@]} != 1 )); then
+            echo "Expected exactly one APatch OTA; found ${#zips[@]}" >&2
+            printf '%s\n' "${zips[@]}"
+            exit 1
+          fi
+          zip="${zips[0]}"
+          base=$(basename "$zip")
+          (cd .tmp/patched && sha256sum "$base" > "$base.sha256")
+
+          # Alpha channel metadata (the Updater line) from the OTA's own metadata.
+          meta=$(unzip -p "$zip" META-INF/com/android/metadata)
+          incremental=$(sed -n 's/^post-build-incremental=//p' <<<"$meta")
+          timestamp=$(sed -n 's/^post-timestamp=//p' <<<"$meta")
+          for channel in alpha alpha-security-preview; do
+            printf '%s %s %s %s\n' "$incremental" "$timestamp" "$DEVICE_ID" "$channel" \
+              > ".tmp/patched/$DEVICE_ID-$channel"
+          done
+
+          notes=$(cat <<WARN
+          > [!CAUTION]
+          > **Experimental Play Integrity test build — do not run as your daily driver.**
+          >
+          > This is an experimental **APatch + Play Integrity (strong-integrity) test OTA** for \$DEVICE_ID, built with INTEGRITY_PATCH. It is published here as a dedicated **prerelease on the alpha channel only**; it is intentionally kept out of the live rolling-ota-feed so it cannot replace the normal APatch OTA.          >
+          > - Integrity spoofing is **revocable by Google and expected to break** at any time.
+          > - The baked keybox is a **throwaway placeholder**. Push your real keybox to /data/local/tmp/playintegrity/keybox.xml after flashing — the hook reads it ahead of the baked one.
+          > - The first boot is **slower**: the stale preopt boot image is deleted and ART's odrefresh rebuilds it from the patched boot classpath.
+          > - Flash only on \$DEVICE_ID, with the matching stock GrapheneOS version already installed, at your own risk.
+          WARN
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --prerelease --title "APatch + Integrity test OTA ($DEVICE_ID)" --notes "$notes"
+            gh release upload "$TAG" "$zip" "$zip.sha256" \
+              ".tmp/patched/$DEVICE_ID-alpha" ".tmp/patched/$DEVICE_ID-alpha-security-preview" --clobber
+          else
+            gh release create "$TAG" --prerelease --title "APatch + Integrity test OTA ($DEVICE_ID)" --notes "$notes" \
+              "$zip" "$zip.sha256" \
+              ".tmp/patched/$DEVICE_ID-alpha" ".tmp/patched/$DEVICE_ID-alpha-security-preview"
+          fi
+          echo "Published $base to prerelease '$TAG'."
