@@ -63,6 +63,7 @@ jar --create --file "$work/program.jar" -C "$classes" .
 # inputs and get repackaged into io.github.david568303.pi.
 out="$work/out"
 mkdir -p "$out"
+mappingOut="$(dirname "$outDex")/mapping.txt"
 echo "build_hook.sh: R8 (min-api $minApi)"
 java -cp "$R8_JAR" com.android.tools.r8.R8 \
   --release \
@@ -70,12 +71,21 @@ java -cp "$R8_JAR" com.android.tools.r8.R8 \
   --pg-conf "$here/hook.pro" \
   --lib "$ANDROID_JAR" \
   --output "$out" \
+  --pg-map-output "$out/mapping.txt" \
   "$work/program.jar" "${bcJars[@]}"
 
 if [[ ! -f "$out/classes.dex" ]]; then
   echo "build_hook.sh: R8 produced no classes.dex" >&2
   exit 1
 fi
+if [[ ! -s "$out/mapping.txt" ]]; then
+  echo "build_hook.sh: R8 mapping file missing or empty" >&2
+  exit 1
+fi
+
 mkdir -p "$(dirname "$outDex")"
 cp "$out/classes.dex" "$outDex"
+cp "$out/mapping.txt" "$mappingOut"
+
 echo "build_hook.sh: wrote $outDex ($(stat -c%s "$outDex") bytes)"
+echo "build_hook.sh: saved R8 mapping to $mappingOut"
