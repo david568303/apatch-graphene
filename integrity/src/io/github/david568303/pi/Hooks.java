@@ -120,4 +120,22 @@ public final class Hooks {
             return null;
         }
     }
+
+        /**
+     * Spoof: report keys as inside secure hardware (TEE/StrongBox).
+     * Returns true so Play Integrity sees hardware-backed keys.
+     */
+    public static boolean isInsideSecureHardware() {
+        PiLog.d("[TEE] isInsideSecureHardware -> true (spoofed hardware)");
+        return true;
+    }
+
+    /**
+     * Spoof: report security level as Trusted Environment (TEE).
+     * Returns 2 = SECURITY_LEVEL_TRUSTED_ENVIRONMENT.
+     */
+    public static int getSecurityLevel() {
+        PiLog.d("[TEE] getSecurityLevel -> 2 (TRUSTED_ENVIRONMENT, spoofed hardware)");
+        return 2;
+    }
 }
