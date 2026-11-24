@@ -109,7 +109,7 @@ jobs:
           SKIP_CLEANUP: 'true'
           NO_COLOR: '1'
           GITHUB_REPO: ${{ github.repository }}
-          FEED_TAG: integrity-apatch-test
+          FEED_TAG: ${{ inputs.release-tag || 'integrity-apatch-test' }}
           PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
           PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
           KEY_AVB_BASE64: ${{ secrets.KEY_AVB_BASE64 }}
@@ -148,7 +148,7 @@ jobs:
           > [!CAUTION]
           > **Experimental Play Integrity test build — do not run as your daily driver.**
           >
-          > This is a **rootless Play Integrity (strong-integrity) test OTA** for \`$DEVICE_ID\`, built with \`INTEGRITY_PATCH\`. It is published here as a dedicated **prerelease on the alpha channel only**; it is intentionally kept out of the live \`rolling-ota-feed\` so it can never reach stable/beta users or replace the real APatch OTA.
+          > This is an experimental **APatch + Play Integrity (strong-integrity) test OTA** for `$DEVICE_ID`, built with `INTEGRITY_PATCH`. It is published here as a dedicated **prerelease on the alpha channel only**; it is intentionally kept out of the live `rolling-ota-feed` so it cannot replace the normal APatch OTA.
           >
           > - Integrity spoofing is **revocable by Google and expected to break** at any time.
           > - The baked keybox is a **throwaway placeholder**. Push your real keybox to \`/data/local/tmp/playintegrity/keybox.xml\` after flashing — the hook reads it ahead of the baked one.
@@ -158,11 +158,11 @@ jobs:
           )
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --prerelease --title "Integrity test OTA ($DEVICE_ID)" --notes "$notes"
+            gh release edit "$TAG" --prerelease --title "APatch + Integrity test OTA ($DEVICE_ID)" --notes "$notes"
             gh release upload "$TAG" "$zip" "$zip.sha256" \
               ".tmp/patched/$DEVICE_ID-alpha" ".tmp/patched/$DEVICE_ID-alpha-security-preview" --clobber
           else
-            gh release create "$TAG" --prerelease --title "Integrity test OTA ($DEVICE_ID)" --notes "$notes" \
+            gh release create "$TAG" --prerelease --title "APatch + Integrity test OTA ($DEVICE_ID)" --notes "$notes" \
               "$zip" "$zip.sha256" \
               ".tmp/patched/$DEVICE_ID-alpha" ".tmp/patched/$DEVICE_ID-alpha-security-preview"
           fi
