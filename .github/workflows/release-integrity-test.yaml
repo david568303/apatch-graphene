@@ -148,12 +148,11 @@ jobs:
           > [!CAUTION]
           > **Experimental Play Integrity test build — do not run as your daily driver.**
           >
-          > This is an experimental **APatch + Play Integrity (strong-integrity) test OTA** for `$DEVICE_ID`, built with `INTEGRITY_PATCH`. It is published here as a dedicated **prerelease on the alpha channel only**; it is intentionally kept out of the live `rolling-ota-feed` so it cannot replace the normal APatch OTA.
-          >
+          > This is an experimental **APatch + Play Integrity (strong-integrity) test OTA** for \$DEVICE_ID, built with INTEGRITY_PATCH. It is published here as a dedicated **prerelease on the alpha channel only**; it is intentionally kept out of the live rolling-ota-feed so it cannot replace the normal APatch OTA.          >
           > - Integrity spoofing is **revocable by Google and expected to break** at any time.
-          > - The baked keybox is a **throwaway placeholder**. Push your real keybox to \`/data/local/tmp/playintegrity/keybox.xml\` after flashing — the hook reads it ahead of the baked one.
+          > - The baked keybox is a **throwaway placeholder**. Push your real keybox to /data/local/tmp/playintegrity/keybox.xml after flashing — the hook reads it ahead of the baked one.
           > - The first boot is **slower**: the stale preopt boot image is deleted and ART's odrefresh rebuilds it from the patched boot classpath.
-          > - Flash only on \`$DEVICE_ID\`, with the matching stock GrapheneOS version already installed, at your own risk.
+          > - Flash only on \$DEVICE_ID, with the matching stock GrapheneOS version already installed, at your own risk.
           WARN
           )
 
