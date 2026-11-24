@@ -96,13 +96,14 @@ jobs:
         env:
           DEVICE_ID: ${{ inputs.device-id || 'mustang' }}
           OTA_VERSION: ${{ inputs.ota-version || '' }}
-          SKIP_APATCH: 'true'
-          SKIP_ROOTLESS: 'false'
+          SKIP_APATCH: 'false'
+          SKIP_ROOTLESS: 'true'
           INTEGRITY_PATCH: 'true'
           FORCE_BUILD: 'true'
           SKIP_CLEANUP: 'true'
           NO_COLOR: '1'
-          # No GITHUB_REPO here on purpose: the build must not read or touch the feed.
+          GITHUB_REPO: ${{ github.repository }}
+          FEED_TAG: integrity-apatch-test
           PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
           PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
           KEY_AVB_BASE64: ${{ secrets.KEY_AVB_BASE64 }}
