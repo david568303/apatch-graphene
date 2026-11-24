@@ -40,6 +40,7 @@ public final class Hooks {
      *         the stock keystore answer (non-target, re-entry, or any failure).
      */
     public static Certificate[] chain(String alias) {
+        PiLog.d("chain() entered");
         if (Boolean.TRUE.equals(REENTRANT.get())) {
             return null; // nested lookup -> fall through to the real body
         }
