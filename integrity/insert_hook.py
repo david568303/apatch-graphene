@@ -40,6 +40,25 @@ LABEL = ":pihook_orig"
 # engineGetCertificateChain(String) is an instance method: p0=this, p1=alias -> 2 param registers.
 PARAM_REGS = 2
 
+# TEE / StrongBox spoof targets: (relative smali path, method signature, hook descriptor)
+TEE_HOOK_SPECS = [
+    (
+        "android/security/keystore/KeyInfo.smali",
+        "isInsideSecureHardware()Z",
+        "Lio/github/david568303/pi/Hooks;->isInsideSecureHardware()Z",
+    ),
+    (
+        "android/security/keystore/KeyCharacteristics.smali",
+        "isInsideSecureHardware()Z",
+        "Lio/github/david568303/pi/Hooks;->isInsideSecureHardware()Z",
+    ),
+    (
+        "android/security/keystore/KeyCharacteristics.smali",
+        "getSecurityLevel()I",
+        "Lio/github/david568303/pi/Hooks;->getSecurityLevel()I",
+    ),
+]
+
 
 def die(msg):
     print(f"insert_hook.py: {msg}", file=sys.stderr)
@@ -61,17 +80,17 @@ def find_target(arg):
     return matches[0]
 
 
-def locate_method(lines):
-    starts = [i for i, ln in enumerate(lines) if METHOD_RE.match(ln)]
+def locate_method(lines, method_re):
+    starts = [i for i, ln in enumerate(lines) if method_re.match(ln)]
     if not starts:
-        die("engineGetCertificateChain(String)[Certificate; not found")
+        return None
     if len(starts) > 1:
-        die("more than one engineGetCertificateChain(String) method")
+        return None  # caller decides how to handle multiple matches
     start = starts[0]
     end = next((i for i in range(start + 1, len(lines))
                 if lines[i].strip() == ".end method"), None)
     if end is None:
-        die(".end method not found for engineGetCertificateChain")
+        return None
     return start, end
 
 
@@ -133,6 +152,102 @@ def body_start(lines, after, end):
     die("no method body to insert before")
 
 
+def splice_method(lines, start, end, hook_desc, ret_const_fmt, ret_op_fmt, label):
+    """Insert a Hooks static-method call + fail-early guard into lines[start:end].
+    Returns the modified lines list."""
+    loc_idx, old_locals, kind = locals_directive(lines, start, end)
+
+    new_local = old_locals + 1
+
+    # Bump the register count directive by one.
+    indent = lines[loc_idx][:len(lines[loc_idx]) - len(lines[loc_idx].lstrip())]
+    if kind == "registers":
+        lines[loc_idx] = f"{indent}.registers {old_locals + 3}"
+    else:
+        lines[loc_idx] = f"{indent}.locals {old_locals + 1}"
+
+    # Find first executable instruction
+    skippable = (".prologue", ".line", ".local", ".restart", ".end local", ".source")
+    i = loc_idx + 1
+    while i < end:
+        s = lines[i].strip()
+        if s == "" or s.startswith("#"):
+            i += 1
+            continue
+        if s.startswith(".param"):
+            i = skip_param(lines, i, end)
+            continue
+        if s.startswith(".annotation"):
+            while i < end and lines[i].strip() != ".end annotation":
+                i += 1
+            i += 1
+            continue
+        if s.startswith(skippable):
+            i += 1
+            continue
+        break
+
+    ins_at = i
+    block = [
+        f"    invoke-static {{}}, {hook_desc}",
+        "",
+        f"    move-result v{new_local}",
+        "",
+        f"    if-eqz v{new_local}, {label}",
+        "",
+        f"    {ret_const_fmt.format(new_local=new_local)}",
+        f"    {ret_op_fmt.format(new_local=new_local)}",
+        "",
+        f"    {label}",
+    ]
+    lines[ins_at:ins_at] = block
+    return lines
+
+
+def splice_tee_hooks(smali_root: pathlib.Path) -> None:
+    """Splice Hooks.isInsideSecureHardware / Hooks.getSecurityLevel into
+    KeyInfo and KeyCharacteristics so Play Integrity sees hardware TEE."""
+    for rel_path, method_sig, hook_desc in TEE_HOOK_SPECS:
+        target = smali_root / rel_path
+        if not target.is_file():
+            print(f"insert_hook.py: TEE target not found, skipping: {rel_path}")
+            continue
+
+        text = target.read_text(encoding="utf-8")
+        lines = text.splitlines()
+
+        method_re = re.compile(
+            r"^\s*\.method\b.*\\b" + re.escape(method_sig) + r"\s*$"
+        )
+        located = locate_method(lines, method_re)
+        if located is None:
+            print(f"insert_hook.py: method {method_sig} not found in {rel_path}")
+            continue
+
+        start, end = located
+
+        if method_sig.endswith("()Z"):
+            ret_const_fmt = "const/4 v{new_local}, 0x1"
+            ret_op_fmt = "return-boolean v{new_local}"
+        elif method_sig.endswith("()I"):
+            ret_const_fmt = "const/4 v{new_local}, 0x2"
+            ret_op_fmt = "return v{new_local}"
+        else:
+            print(f"insert_hook.py: unsupported return type for {method_sig}, skipping")
+            continue
+
+        lines = splice_method(
+            lines, start, end, hook_desc,
+            ret_const_fmt, ret_op_fmt, ":tee_orig",
+        )
+
+        out = "\n".join(lines)
+        if text.endswith("\n"):
+            out += "\n"
+        target.write_text(out, encoding="utf-8")
+        print(f"insert_hook.py: spliced TEE hook {method_sig} into {rel_path}")
+
+
 def main(arg):
     target = find_target(arg)
     text = target.read_text(encoding="utf-8")
@@ -140,7 +255,12 @@ def main(arg):
         die(f"{target} already carries the hook (double patch?)")
 
     lines = text.splitlines()
-    start, end = locate_method(lines)
+    method_re = METHOD_RE
+    located = locate_method(lines, method_re)
+    if located is None:
+        die("engineGetCertificateChain(String)[Certificate; not found")
+
+    start, end = located
     loc_idx, old_locals, kind = locals_directive(lines, start, end)
 
     new_local = old_locals          # new top local register index
@@ -179,113 +299,9 @@ def main(arg):
           f"{old_locals + PARAM_REGS + 1 if kind == 'registers' else old_locals + 1}, "
           f"new local v{new_local})")
 
-def splice_tee_hooks(target: pathlib.Path) -> None:
-    """Splice Hooks.isInsideSecureHardware / Hooks.getSecurityLevel into
-    KeyInfo and KeyCharacteristics so Play Integrity sees hardware TEE."""
-    text = target.read_text(encoding="utf-8")
+    # === TEE / StrongBox spoof hooks ===
+    splice_tee_hooks(target.parent.parent)
 
-    # (method_regex, hook_descriptor, register, return_opcode, return_const, label)
-    TEE_HOOKS = [
-        (
-            r"^\s*\.method\b.*\bisInsideSecureHardware\(\)Z\s*$",
-            "Lio/github/david568303/pi/Hooks;->isInsideSecureHardware()Z",
-            "p0",
-            "return-boolean",
-            "const/4 v{new_local}, 0x1",
-            ":tee_orig",
-        ),
-        (
-            r"^\s*\.method\b.*\bgetSecurityLevel\(\)I\s*$",
-            "Lio/github/david568303/pi/Hooks;->getSecurityLevel()I",
-            "p0",
-            "return",
-            "const/4 v{new_local}, 0x2",
-            ":tee_orig",
-        ),
-    ]
-
-    for method_re, hook_desc, reg, ret_op, ret_const, label in TEE_HOOKS:
-        starts = [i for i, ln in enumerate(text.splitlines()) if re.compile(method_re).match(ln)]
-        if not starts:
-            continue  # method not in this file
-        lines = text.splitlines()
-        start = starts[0]
-        end = next((i for i in range(start + 1, len(lines)) if lines[i].strip() == ".end method"), None)
-        if end is None:
-            continue
-
-        # Find .locals or .registers
-        loc_idx = None
-        old_locals = 0
-        kind = "locals"
-        for i in range(start + 1, end):
-            s = lines[i].strip()
-            if s.startswith(".locals "):
-                loc_idx = i
-                old_locals = int(s.split()[1])
-                kind = "locals"
-                break
-            if s.startswith(".registers "):
-                total = int(s.split()[1])
-                loc_idx = i
-                old_locals = total - 2  # p0=this, p1=arg for instance methods
-                kind = "registers"
-                break
-        if loc_idx is None:
-            continue
-
-        new_local = old_locals + 1
-
-        # Bump register count by 1
-        indent = lines[loc_idx][:len(lines[loc_idx]) - len(lines[loc_idx].lstrip())]
-        if kind == "registers":
-            lines[loc_idx] = f"{indent}.registers {old_locals + 2 + 1}"
-        else:
-            lines[loc_idx] = f"{indent}.locals {old_locals + 1}"
-
-        # Find first executable instruction
-        skippable = (".prologue", ".line", ".local", ".restart", ".end local", ".source")
-        i = loc_idx + 1
-        while i < end:
-            s = lines[i].strip()
-            if s == "" or s.startswith("#"):
-                i += 1
-                continue
-            if s.startswith(".param"):
-                i += 1
-                while i < end and lines[i].strip() not in (".end param",):
-                    i += 1
-                i += 1
-                continue
-            if s.startswith(".annotation"):
-                while i < end and lines[i].strip() != ".end annotation":
-                    i += 1
-                i += 1
-                continue
-            if s.startswith(skippable):
-                i += 1
-                continue
-            break
-
-        ins_at = i
-        block = [
-            f"    invoke-virtual {{{reg}}}, {hook_desc}",
-            "",
-            f"    move-result v{new_local}",
-            "",
-            f"    if-eqz v{new_local}, {label}",
-            "",
-            f"    {ret_const}",
-            f"    {ret_op} v{new_local}",
-            "",
-            f"    {label}",
-        ]
-        lines[ins_at:ins_at] = block
-
-        out = "\n".join(lines)
-        if text.endswith("\n"):
-            out += "\n"
-        target.write_text(out, encoding="utf-8")
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
