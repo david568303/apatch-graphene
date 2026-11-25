@@ -41,6 +41,14 @@ on:
         description: Tag for the dedicated prerelease
         required: false
         default: integrity-apatch-test
+      verified-boot-key:
+        description: RootOfTrust verifiedBootKey (hex/base64). Empty bakes 32 zero bytes, which is INVALID and Play Integrity rejects it.
+        required: false
+        default: ''
+      verified-boot-hash:
+        description: RootOfTrust verifiedBootHash (hex/base64). Empty bakes 32 zero bytes.
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -111,6 +119,8 @@ jobs:
           SKIP_APATCH: 'false'
           SKIP_ROOTLESS: 'true'
           INTEGRITY_PATCH: 'true'
+          INTEGRITY_VERIFIED_BOOT_KEY: ${{ inputs.verified-boot-key || '' }}
+          INTEGRITY_VERIFIED_BOOT_HASH: ${{ inputs.verified-boot-hash || '' }}
           FORCE_BUILD: 'true'
           SKIP_CLEANUP: 'true'
           NO_COLOR: '1'

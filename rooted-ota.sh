@@ -1144,7 +1144,13 @@ function generateIntegrityConfig() {
 function generateRootOfTrust() {
   local out="$1" key="$INTEGRITY_VERIFIED_BOOT_KEY" hash="$INTEGRITY_VERIFIED_BOOT_HASH"
   local zeros; zeros=$(printf '00%.0s' {1..32})
-  [[ -z "$key" ]] && key="$zeros"
+  if [[ -z "$key" ]]; then
+    printRed "WARNING: INTEGRITY_VERIFIED_BOOT_KEY is unset -> baking an all-zero verifiedBootKey."
+    printRed "         A VERIFIED + deviceLocked RootOfTrust with a zero boot key is an invalid"
+    printRed "         combination; Play Integrity rejects it. Set it to the value your locked"
+    printRed "         device actually attests (see README / workflow input verified-boot-key)."
+    key="$zeros"
+  fi
   [[ -z "$hash" ]] && hash="$zeros"
   jq -n --arg k "$key" --arg h "$hash" \
     '{verifiedBootKey:$k, verifiedBootHash:$h, deviceLocked:true, verifiedBootState:"VERIFIED"}' \
