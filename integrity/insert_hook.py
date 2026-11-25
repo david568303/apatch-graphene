@@ -56,15 +56,48 @@ def locate_method(lines, method_re):
     return start, end
 
 
-def locals_directive(lines, start, end):
+def locals_directive(lines, start, end, param_regs=PARAM_REGS):
     for i in range(start + 1, end):
         s = lines[i].strip()
         if s.startswith(".locals "):
             return i, int(s.split()[1]), "locals"
         if s.startswith(".registers "):
             total = int(s.split()[1])
-            return i, total - PARAM_REGS, "registers"
+            return i, total - param_regs, "registers"
     die("neither .locals nor .registers found (abstract/native method?)")
+
+
+def param_reg_count(method_line):
+    """Parameter register count for a .method line: one per argument word (wide
+    types J/D take two) plus one for the implicit `this`, unless the method is
+    static. PARAM_REGS is the fixed value for the chain method; the TEE methods
+    are no-arg, so their count differs and must be derived per method."""
+    m = re.search(r"\((.*)\)", method_line)
+    desc = m.group(1) if m else ""
+    regs, i = 0, 0
+    while i < len(desc):
+        c = desc[i]
+        if c == "L":
+            i = desc.index(";", i) + 1
+            regs += 1
+        elif c == "[":
+            i += 1
+            while i < len(desc) and desc[i] == "[":
+                i += 1
+            if i < len(desc) and desc[i] == "L":
+                i = desc.index(";", i) + 1
+            else:
+                i += 1
+            regs += 1
+        elif c in "JD":
+            regs += 2
+            i += 1
+        else:  # Z B S C I F
+            regs += 1
+            i += 1
+    if not re.search(r"\bstatic\b", method_line.split("(")[0]):
+        regs += 1  # implicit `this`
+    return regs
 
 
 def skip_param(lines, i, end):
@@ -108,11 +141,12 @@ def body_start(lines, after, end):
 
 
 def splice_method(lines, start, end, hook_desc, ret_const_fmt, ret_op_fmt, label):
-    loc_idx, old_locals, kind = locals_directive(lines, start, end)
-    new_local = old_locals + 1
+    param_regs = param_reg_count(lines[start])
+    loc_idx, old_locals, kind = locals_directive(lines, start, end, param_regs)
+    new_local = old_locals          # the one freed local slot is v(old_locals)
     indent = lines[loc_idx][:len(lines[loc_idx]) - len(lines[loc_idx].lstrip())]
     if kind == "registers":
-        lines[loc_idx] = f"{indent}.registers {old_locals + 3}"
+        lines[loc_idx] = f"{indent}.registers {old_locals + param_regs + 1}"
     else:
         lines[loc_idx] = f"{indent}.locals {old_locals + 1}"
 
@@ -161,10 +195,13 @@ def splice_tee_hooks(smali_root: pathlib.Path) -> None:
             continue
 
         text = target.read_text(encoding="utf-8")
+        if hook_desc in text:
+            print(f"insert_hook.py: {rel_path} already carries {method_sig} hook, skipping")
+            continue
         lines = text.splitlines()
 
         method_re = re.compile(
-            r"^\s*\.method\b.*\\b" + re.escape(method_sig) + r"\\s*$"
+            r"^\s*\.method\b.*\b" + re.escape(method_sig) + r"\s*$"
         )
         located = locate_method(lines, method_re)
         if located is None:
@@ -173,9 +210,11 @@ def splice_tee_hooks(smali_root: pathlib.Path) -> None:
 
         start, end = located
 
+        # Dalvik has no return-boolean: Z and I are both 32-bit values returned
+        # with the plain `return vAA`.
         if method_sig.endswith("()Z"):
             ret_const_fmt = "const/4 v{new_local}, 0x1"
-            ret_op_fmt = "return-boolean v{new_local}"
+            ret_op_fmt = "return v{new_local}"
         elif method_sig.endswith("()I"):
             ret_const_fmt = "const/4 v{new_local}, 0x2"
             ret_op_fmt = "return v{new_local}"

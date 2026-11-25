@@ -121,7 +121,7 @@ public final class Hooks {
         }
     }
 
-        /**
+    /**
      * Spoof: report keys as inside secure hardware (TEE/StrongBox).
      * Returns true so Play Integrity sees hardware-backed keys.
      */
