@@ -48,6 +48,21 @@ QEMU=/opt/qemu-10/bin/qemu-system-aarch64 ./boot.sh work/bad work/bad.initrd wor
 Without the `patchvendor.py`/`patchfile.py` steps the boot stops in `late-fs`, waiting for
 KeyMint to unlock `/data`. That is still enough for anything up to `post-fs-data`.
 
+To boot a new build on the state an old one left behind, as an update does:
+
+```bash
+qemu-img convert -O raw old-run.qcow2 old-after.img      # overlay written by boot.sh
+cp --sparse=always work/bad-disk.img work/bad-upgrade.img
+./carryover.py old-after.img work/bad-upgrade.img         # misc, persist, userdata, metadata
+```
+
+Magisk resolves its preinit directory on `/metadata` to `watchdog/magisk` once Android has
+created `/metadata/watchdog`, and to `magisk` before that. So `preinit-root` carries the VM's
+boot-HAL rule in both places. `preinit-fix.c` is a static PID 1 that mounts one f2fs
+partition read-write (the kernel replays any fsync log), writes a file into it, and
+unmounts cleanly. Use it to add the rule to a carried-over disk without userspace f2fs tools,
+which refuse unclean images.
+
 `poltest.c` is a static PID 1 that loads SELinux policies into a kernel and reports the
 result. `ikconfig.py` extracts a kernel's embedded config.
 
@@ -72,3 +87,25 @@ result. `ikconfig.py` extracts a kernel's embedded config.
   hook. It runs until system_server dies for lack of phone HALs, at the same point
   (~215 s) and in the same way as 2026110201 in the same VM. Not covered: Zygisk (off on a
   fresh `/data`), the user's modules, and the first boot from VAB snapshots.
+- The package passes `avbroot ota verify` against the 2026110201 OTA certificate and the
+  published `avb_pkmd.bin`; OTA and AVB keys are the same as 2026110201. Its payload's
+  snapshot settings match too: VABC lz4, the same COW version and compression factor,
+  `disable_ublk`.
+- Tooling bumps in that build don't change the output: avbroot 3.38/3.39 (CLI parser, boot
+  v0-v2 `id`), afsr 2.1.0 (CLI parser, same e2fsprogs), my-avbroot-setup (Python lockfile).
+- The kernel has no changes in `drivers/md`, io_uring or the block layer (virtio_blk aside),
+  so the snapshot boot path is unchanged.
+- In frameworks_base (2026110200..2026110800) the zygote JNI signatures pixincreate's Zygisk
+  hooks are identical. The only exec-spawning change sets NO_NEW_PRIVS and the shared app GID
+  for WebView/app-zygote replacements, and leaves the replay contract Zygisk checks
+  (`fds_to_close == {-1,-1}`, flag bit 3) as it was.
+- GrapheneOS reports of unrooted Pixel 10 bootloops in this period ("Cannot load Android
+  system" after a battery drain, os-issue-tracker #9131/#9196) are attributed to upstream f2fs
+  bugs. 2026110801 is the first frankel kernel with the large f2fs metadata-cache backport.
+- `carryover.py` emulates the update's data side: boot the old build, flatten its overlay,
+  copy misc/persist/userdata/metadata into the new build's disk, and boot that.
+- Update emulation: 2026110201 booted on a fresh disk (Magisk post-fs-data, zygote), then
+  2026110801 booted on its misc/persist/userdata/metadata. The new kernel replayed the old
+  kernel's f2fs logs on `/metadata` and `/data` (including `magisk.db`) without errors. magiskd
+  ran post-fs-data on the existing state, and boot reached zygote, which the VM's missing
+  display HAL then restarts. That matches the fresh-disk runs of both builds.
