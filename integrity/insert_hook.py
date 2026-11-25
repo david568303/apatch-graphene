@@ -18,6 +18,12 @@ HOOK = ("Lio/github/david568303/pi/Hooks;->chain("
 LABEL = ":pihook_orig"
 PARAM_REGS = 2
 
+# KeyInfo is the app-facing key descriptor; its two secure-hardware accessors
+# are the real client-side probes. android.security.keystore.KeyCharacteristics
+# is NOT a framework class (the real one is android.security.keymaster.*, with a
+# different shape), so it was never a valid target and is dropped. Each hook is a
+# gate (see Hooks): a non-zero return makes the splice return the spoofed
+# constant; zero falls through to the stock body.
 TEE_HOOK_SPECS = [
     (
         "android/security/keystore/KeyInfo.smali",
@@ -25,12 +31,7 @@ TEE_HOOK_SPECS = [
         "Lio/github/david568303/pi/Hooks;->isInsideSecureHardware()Z",
     ),
     (
-        "android/security/keystore/KeyCharacteristics.smali",
-        "isInsideSecureHardware()Z",
-        "Lio/github/david568303/pi/Hooks;->isInsideSecureHardware()Z",
-    ),
-    (
-        "android/security/keystore/KeyCharacteristics.smali",
+        "android/security/keystore/KeyInfo.smali",
         "getSecurityLevel()I",
         "Lio/github/david568303/pi/Hooks;->getSecurityLevel()I",
     ),
@@ -211,12 +212,15 @@ def splice_tee_hooks(smali_root: pathlib.Path) -> None:
         start, end = located
 
         # Dalvik has no return-boolean: Z and I are both 32-bit values returned
-        # with the plain `return vAA`.
+        # with the plain `return vAA`. The spoofed constant is what the splice
+        # returns when the hook gate fires: 0x1 is `true` for ()Z, and
+        # SECURITY_LEVEL_TRUSTED_ENVIRONMENT (1) for ()I -- matching the TEE level
+        # the forged attestation chain claims (KeyboxChainGenerator).
         if method_sig.endswith("()Z"):
             ret_const_fmt = "const/4 v{new_local}, 0x1"
             ret_op_fmt = "return v{new_local}"
         elif method_sig.endswith("()I"):
-            ret_const_fmt = "const/4 v{new_local}, 0x2"
+            ret_const_fmt = "const/4 v{new_local}, 0x1"
             ret_op_fmt = "return v{new_local}"
         else:
             print(f"insert_hook.py: unsupported return type for {method_sig}, skipping")

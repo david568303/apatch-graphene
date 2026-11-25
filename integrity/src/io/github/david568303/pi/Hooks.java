@@ -122,20 +122,49 @@ public final class Hooks {
     }
 
     /**
-     * Spoof: report keys as inside secure hardware (TEE/StrongBox).
-     * Returns true so Play Integrity sees hardware-backed keys.
+     * TEE/StrongBox spoofs for the client-side KeyInfo accessors, spliced into
+     * the head of KeyInfo#isInsideSecureHardware and #getSecurityLevel. The
+     * splice treats the returned value as a gate: a non-zero result makes the
+     * method return the spoofed constant, a zero result falls through to the
+     * stock body. Both are therefore scoped to the configured target packages,
+     * exactly like chain() -- a non-target process gets the device's real answer.
+     *
+     * These are app-facing, in-process self-reports; they do not feed Play
+     * Integrity's server-side verdict (that rides on the attestation chain from
+     * chain()). Scoping keeps the device's real behaviour intact for every other
+     * app and keystore client, instead of lying to the whole system.
      */
     public static boolean isInsideSecureHardware() {
-        PiLog.d("[TEE] isInsideSecureHardware -> true (spoofed hardware)");
-        return true;
+        boolean target = isTargetCaller();
+        PiLog.d("[TEE] isInsideSecureHardware gate -> " + target);
+        return target; // true -> splice returns 0x1 (secure hw); false -> stock body
     }
 
     /**
-     * Spoof: report security level as Trusted Environment (TEE).
-     * Returns 2 = SECURITY_LEVEL_TRUSTED_ENVIRONMENT.
+     * @return non-zero for a target caller, so the splice returns the spoofed
+     *         SECURITY_LEVEL_TRUSTED_ENVIRONMENT (1); 0 for a non-target, which
+     *         falls through to the stock body (the device's real level).
      */
     public static int getSecurityLevel() {
-        PiLog.d("[TEE] getSecurityLevel -> 2 (TRUSTED_ENVIRONMENT, spoofed hardware)");
-        return 2;
+        boolean target = isTargetCaller();
+        PiLog.d("[TEE] getSecurityLevel gate -> " + target + " (returns TEE=1 when fired)");
+        return target ? 1 : 0;
+    }
+
+    /** True when the current process owns one of the configured target packages. */
+    private static boolean isTargetCaller() {
+        try {
+            Context ctx = Ctx.get();
+            if (ctx == null) {
+                return false;
+            }
+            int uid = android.os.Process.myUid();
+            String[] pkgs = ctx.getPackageManager().getPackagesForUid(uid);
+            Config cfg = Config.current();
+            return cfg != null && cfg.matches(pkgs);
+        } catch (Throwable t) {
+            PiLog.w("isTargetCaller failed", t);
+            return false;
+        }
     }
 }
