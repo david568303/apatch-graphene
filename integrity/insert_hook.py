@@ -300,7 +300,7 @@ def main(arg):
           f"new local v{new_local})")
 
     # === TEE / StrongBox spoof hooks ===
-    splice_tee_hooks(target.parent.parent.parent)
+    splice_tee_hooks(target.parent.parent.parent.parent)
 
 
 if __name__ == "__main__":
