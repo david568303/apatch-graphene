@@ -1145,10 +1145,9 @@ function generateRootOfTrust() {
   local out="$1" key="$INTEGRITY_VERIFIED_BOOT_KEY" hash="$INTEGRITY_VERIFIED_BOOT_HASH"
   local zeros; zeros=$(printf '00%.0s' {1..32})
   if [[ -z "$key" ]]; then
-    printRed "WARNING: INTEGRITY_VERIFIED_BOOT_KEY is unset -> baking an all-zero verifiedBootKey."
-    printRed "         A VERIFIED + deviceLocked RootOfTrust with a zero boot key is an invalid"
-    printRed "         combination; Play Integrity rejects it. Set it to the value your locked"
-    printRed "         device actually attests (see README / workflow input verified-boot-key)."
+    print "INTEGRITY_VERIFIED_BOOT_KEY unset -> baking a zero placeholder; at runtime the hook"
+    print "reuses the device's real verifiedBootKey (or derives a non-zero one), so the attested"
+    print "RootOfTrust is never the zero value. Set this only to force a specific verifiedBootKey."
     key="$zeros"
   fi
   [[ -z "$hash" ]] && hash="$zeros"

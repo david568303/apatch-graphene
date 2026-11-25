@@ -37,6 +37,7 @@ import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.ASN1OctetString;
 import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.asn1.ASN1TaggedObject;
 import org.bouncycastle.asn1.ASN1Boolean;
 import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.DERNull;
@@ -101,8 +102,9 @@ final class KeyboxChainGenerator {
         }
 
         KeyGenParameters p = KeyGenParameters.from(realLeaf, appKey, isEc);
+        Config.RootOfTrust rot = effectiveRootOfTrust(realLeaf, cfg.rootOfTrust, batchChain.get(0));
         X509Certificate leaf = buildLeaf(appKey, batchKey, batchChain.get(0), p, isEc,
-                cfg.rootOfTrust, ctx, uid);
+                rot, ctx, uid);
 
         Certificate[] out = new Certificate[1 + batchChain.size()];
         out[0] = leaf;
@@ -179,6 +181,99 @@ final class KeyboxChainGenerator {
             v.add(new ASN1Integer(i));
         }
         return new DERSet(v);
+    }
+
+    /**
+     * The RootOfTrust the spoofed leaf attests: always the strong state
+     * (deviceLocked = true, verifiedBootState = Verified), over a NON-EMPTY
+     * verifiedBootKey/Hash. The byte values are taken, in order of preference,
+     * from: the build config (if set to a non-zero value), else the device's own
+     * real attestation (so a self-signed keybox needs no external "stock" value),
+     * else a deterministic value derived from the keybox leaf. The result is
+     * never the all-zero placeholder, which is an invalid RootOfTrust.
+     */
+    private static Config.RootOfTrust effectiveRootOfTrust(X509Certificate realLeaf,
+                                                           Config.RootOfTrust cfgRot,
+                                                           X509Certificate keyboxLeaf) {
+        byte[] key = (cfgRot != null && !isBlank(cfgRot.verifiedBootKey)) ? cfgRot.verifiedBootKey : null;
+        byte[] hash = (cfgRot != null && !isBlank(cfgRot.verifiedBootHash)) ? cfgRot.verifiedBootHash : null;
+
+        if (key == null || hash == null) {
+            byte[][] real = realBootValues(realLeaf);
+            if (real != null) {
+                if (key == null && !isBlank(real[0])) key = real[0];
+                if (hash == null && !isBlank(real[1])) hash = real[1];
+            }
+        }
+        if (key == null) key = sha256(encoded(keyboxLeaf));   // deterministic, non-zero
+        if (hash == null) hash = sha256(key);
+        PiLog.d("RootOfTrust: verifiedBootKey=" + head(key) + " verifiedBootHash=" + head(hash)
+                + " (forced deviceLocked + Verified)");
+        return new Config.RootOfTrust(key, hash, true, 0); // deviceLocked=true, verifiedBootState=Verified
+    }
+
+    /** {verifiedBootKey, verifiedBootHash} from the real leaf's attestation extension, or null. */
+    private static byte[][] realBootValues(X509Certificate realLeaf) {
+        try {
+            byte[] ev = realLeaf.getExtensionValue(ATTESTATION_OID);
+            if (ev == null) {
+                return null;
+            }
+            ASN1Sequence kd = ASN1Sequence.getInstance(ASN1OctetString.getInstance(ev).getOctets());
+            for (int idx : new int[]{7, 6}) {   // teeEnforced, then softwareEnforced
+                ASN1Sequence list = ASN1Sequence.getInstance(kd.getObjectAt(idx));
+                for (int i = 0; i < list.size(); i++) {
+                    ASN1TaggedObject to = ASN1TaggedObject.getInstance(list.getObjectAt(i));
+                    if (to.getTagNo() == T_ROOT_OF_TRUST) {
+                        ASN1Sequence r = ASN1Sequence.getInstance(to.getBaseObject().toASN1Primitive());
+                        return new byte[][]{
+                                ASN1OctetString.getInstance(r.getObjectAt(0)).getOctets(),
+                                ASN1OctetString.getInstance(r.getObjectAt(3)).getOctets()};
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            PiLog.d("could not read real RootOfTrust: " + t);
+        }
+        return null;
+    }
+
+    private static boolean isBlank(byte[] b) {
+        if (b == null || b.length == 0) {
+            return true;
+        }
+        for (byte x : b) {
+            if (x != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static byte[] encoded(X509Certificate c) {
+        try {
+            return c.getEncoded();
+        } catch (Throwable t) {
+            return new byte[]{1};
+        }
+    }
+
+    private static byte[] sha256(byte[] b) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(b);
+        } catch (Throwable t) {
+            byte[] f = new byte[32];
+            f[0] = 1;   // never all-zero
+            return f;
+        }
+    }
+
+    private static String head(byte[] b) {
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < Math.min(4, b.length); i++) {
+            s.append(String.format("%02x", b[i]));
+        }
+        return s + "..(" + b.length + "B)";
     }
 
     private static DERSequence rootOfTrust(Config.RootOfTrust rot) {
