@@ -17,6 +17,7 @@ import android.content.Context;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -58,10 +59,12 @@ public final class Hooks {
 
     private static Certificate[] chainInner(String alias) throws Exception {
         if (alias == null) {
+            PiLog.d("skip: null alias");
             return null;
         }
         Context ctx = Ctx.get();
         if (ctx == null) {
+            PiLog.d("skip: no app context for " + alias);
             return null;
         }
 
@@ -70,12 +73,18 @@ public final class Hooks {
         int uid = android.os.Process.myUid();
         String[] pkgs = ctx.getPackageManager().getPackagesForUid(uid);
         Config cfg = Config.current();
-        if (cfg == null || !cfg.matches(pkgs)) {
+        if (cfg == null) {
+            PiLog.d("skip: no config loaded (uid=" + uid + " pkgs=" + Arrays.toString(pkgs) + ")");
+            return null;
+        }
+        if (!cfg.matches(pkgs)) {
+            PiLog.d("skip: caller not targeted (uid=" + uid + " pkgs=" + Arrays.toString(pkgs) + ")");
             return null;
         }
 
         IKeyboxProvider kb = KeyProviderManager.getProvider();
         if (kb == null || !kb.hasKeybox()) {
+            PiLog.d("skip: no keybox (provider=" + (kb != null) + ") for " + alias);
             return null;
         }
 
@@ -88,6 +97,7 @@ public final class Hooks {
 
         Certificate[] cached = CACHE.get(alias);
         if (cached != null) {
+            PiLog.d("served cached spoofed chain for " + alias);
             return cached;
         }
 
@@ -97,11 +107,14 @@ public final class Hooks {
         // so we fall through rather than return a bogus chain.
         Certificate[] real = realChain(alias);
         if (real == null || real.length == 0 || !(real[0] instanceof X509Certificate)) {
+            PiLog.d("skip: real chain empty/not X509 for " + alias
+                    + " (len=" + (real == null ? -1 : real.length) + ")");
             return null;
         }
 
         Certificate[] built = KeyboxChainGenerator.generate((X509Certificate) real[0], kb, cfg, ctx, uid);
         if (built == null || built.length == 0) {
+            PiLog.d("skip: generator returned nothing for " + alias);
             return null;
         }
         CACHE.put(alias, built);
