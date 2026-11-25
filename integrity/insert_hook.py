@@ -217,7 +217,7 @@ def splice_tee_hooks(smali_root: pathlib.Path) -> None:
         lines = text.splitlines()
 
         method_re = re.compile(
-            r"^\s*\.method\b.*\\b" + re.escape(method_sig) + r"\s*$"
+            r"^\s*\.method\b.*\\b" + re.escape(method_sig) + r"\\s*$"
         )
         located = locate_method(lines, method_re)
         if located is None:
@@ -257,47 +257,48 @@ def main(arg):
     lines = text.splitlines()
     method_re = METHOD_RE
     located = locate_method(lines, method_re)
-    if located is None:
-        die("engineGetCertificateChain(String)[Certificate; not found")
 
-    start, end = located
-    loc_idx, old_locals, kind = locals_directive(lines, start, end)
+    if located is not None:
+        start, end = located
+        loc_idx, old_locals, kind = locals_directive(lines, start, end)
 
-    new_local = old_locals          # new top local register index
-    # Only invoke-static {p1} (35c form, 4-bit reg fields) constrains us: after
-    # the bump p1 sits at v(old_locals+2). Keep it addressable.
-    if old_locals + PARAM_REGS > 15:
-        die(f"too many locals ({old_locals}); p1 would exceed v15 for invoke-static")
-    if new_local > 255:
-        die(f"new local v{new_local} exceeds v255")
+        new_local = old_locals          # new top local register index
+        # Only invoke-static {p1} (35c form, 4-bit reg fields) constrains us: after
+        # the bump p1 sits at v(old_locals+2). Keep it addressable.
+        if old_locals + PARAM_REGS > 15:
+            die(f"too many locals ({old_locals}); p1 would exceed v15 for invoke-static")
+        if new_local > 255:
+            die(f"new local v{new_local} exceeds v255")
 
-    # Bump the register count directive by one.
-    indent = lines[loc_idx][:len(lines[loc_idx]) - len(lines[loc_idx].lstrip())]
-    lines[loc_idx] = f"{indent}.{kind} {old_locals + PARAM_REGS + 1 if kind == 'registers' else old_locals + 1}"
+        # Bump the register count directive by one.
+        indent = lines[loc_idx][:len(lines[loc_idx]) - len(lines[loc_idx].lstrip())]
+        lines[loc_idx] = f"{indent}.{kind} {old_locals + PARAM_REGS + 1 if kind == 'registers' else old_locals + 1}"
 
-    ins_at = body_start(lines, loc_idx, end)
-    block = [
-        f"    invoke-static {{p1}}, {HOOK}",
-        "",
-        f"    move-result-object v{new_local}",
-        "",
-        f"    if-eqz v{new_local}, {LABEL}",
-        "",
-        f"    return-object v{new_local}",
-        "",
-        f"    {LABEL}",
-    ]
-    lines[ins_at:ins_at] = block
+        ins_at = body_start(lines, loc_idx, end)
+        block = [
+            f"    invoke-static {{p1}}, {HOOK}",
+            "",
+            f"    move-result-object v{new_local}",
+            "",
+            f"    if-eqz v{new_local}, {LABEL}",
+            "",
+            f"    return-object v{new_local}",
+            "",
+            f"    {LABEL}",
+        ]
+        lines[ins_at:ins_at] = block
 
-    # Keep the trailing newline the file had.
-    out = "\n".join(lines)
-    if text.endswith("\n"):
-        out += "\n"
-    target.write_text(out, encoding="utf-8")
-    print(f"insert_hook.py: patched {target} "
-          f"(.{kind} {old_locals + (PARAM_REGS if kind == 'registers' else 0)} -> "
-          f"{old_locals + PARAM_REGS + 1 if kind == 'registers' else old_locals + 1}, "
-          f"new local v{new_local})")
+        # Keep the trailing newline the file had.
+        out = "\n".join(lines)
+        if text.endswith("\n"):
+            out += "\n"
+        target.write_text(out, encoding="utf-8")
+        print(f"insert_hook.py: patched {target} "
+              f"(.{kind} {old_locals + (PARAM_REGS if kind == 'registers' else 0)} -> "
+              f"{old_locals + PARAM_REGS + 1 if kind == 'registers' else old_locals + 1}, "
+              f"new local v{new_local})")
+    else:
+        print(f"insert_hook.py: engineGetCertificateChain not found in {target}, skipping chain splice")
 
     # === TEE / StrongBox spoof hooks ===
     splice_tee_hooks(target.parent.parent.parent.parent)
