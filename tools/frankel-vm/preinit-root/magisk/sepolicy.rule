@@ -1,0 +1,2 @@
+permissive hal_bootctl_default
+permissive fsck
