@@ -123,48 +123,25 @@ public final class Hooks {
 
     /**
      * TEE/StrongBox spoofs for the client-side KeyInfo accessors, spliced into
-     * the head of KeyInfo#isInsideSecureHardware and #getSecurityLevel. The
-     * splice treats the returned value as a gate: a non-zero result makes the
-     * method return the spoofed constant, a zero result falls through to the
-     * stock body. Both are therefore scoped to the configured target packages,
-     * exactly like chain() -- a non-target process gets the device's real answer.
+     * the head of KeyInfo#isInsideSecureHardware and #getSecurityLevel. Applied
+     * OS-wide (unconditional): the splice returns the spoofed constant whenever
+     * the hook returns non-zero, and these always do, so every caller in every
+     * process sees hardware-backed / TEE -- not scoped to the target config, so
+     * it also covers the process that actually calls these accessors (DroidGuard
+     * and apps that probe their own key), where caller resolution is unreliable.
      *
-     * These are app-facing, in-process self-reports; they do not feed Play
-     * Integrity's server-side verdict (that rides on the attestation chain from
-     * chain()). Scoping keeps the device's real behaviour intact for every other
-     * app and keystore client, instead of lying to the whole system.
+     * Caveats: these are app-facing, in-process self-reports and do not feed
+     * Play Integrity's server-side verdict (that rides on chain()'s attestation
+     * chain). OS-wide scope means software-only keys now report as hardware-
+     * backed too, and a genuine StrongBox key's level is reported as TEE (1).
      */
     public static boolean isInsideSecureHardware() {
-        boolean target = isTargetCaller();
-        PiLog.d("[TEE] isInsideSecureHardware gate -> " + target);
-        return target; // true -> splice returns 0x1 (secure hw); false -> stock body
+        PiLog.d("[TEE] isInsideSecureHardware -> true (OS-wide)");
+        return true;
     }
 
-    /**
-     * @return non-zero for a target caller, so the splice returns the spoofed
-     *         SECURITY_LEVEL_TRUSTED_ENVIRONMENT (1); 0 for a non-target, which
-     *         falls through to the stock body (the device's real level).
-     */
     public static int getSecurityLevel() {
-        boolean target = isTargetCaller();
-        PiLog.d("[TEE] getSecurityLevel gate -> " + target + " (returns TEE=1 when fired)");
-        return target ? 1 : 0;
-    }
-
-    /** True when the current process owns one of the configured target packages. */
-    private static boolean isTargetCaller() {
-        try {
-            Context ctx = Ctx.get();
-            if (ctx == null) {
-                return false;
-            }
-            int uid = android.os.Process.myUid();
-            String[] pkgs = ctx.getPackageManager().getPackagesForUid(uid);
-            Config cfg = Config.current();
-            return cfg != null && cfg.matches(pkgs);
-        } catch (Throwable t) {
-            PiLog.w("isTargetCaller failed", t);
-            return false;
-        }
+        PiLog.d("[TEE] getSecurityLevel -> TEE=1 (OS-wide)");
+        return 1;
     }
 }
