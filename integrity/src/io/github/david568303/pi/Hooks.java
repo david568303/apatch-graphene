@@ -34,6 +34,12 @@ public final class Hooks {
     private static final Map<String, Certificate[]> CACHE = new ConcurrentHashMap<>();
     private static volatile long sCacheVersion = Long.MIN_VALUE;
 
+    // Android key-attestation extension. Present on the leaf of a real
+    // attestation chain; absent on ordinary keystore keys. chain() runs OS-wide
+    // (no package gate) but only replaces a chain that carries this, so normal
+    // keys -- TLS client certs, app-signing keys, system keys -- are untouched.
+    private static final String ATTESTATION_OID = "1.3.6.1.4.1.11129.2.1.17";
+
     private Hooks() {}
 
     /**
@@ -68,17 +74,15 @@ public final class Hooks {
             return null;
         }
 
-        // uid -> packages -> config match. A miss is the overwhelmingly common
-        // path (every keystore user that is not a target), so it stays cheap.
+        // uid/packages are resolved only for logging and attestationApplicationId
+        // now: chain() is OS-wide, so there is no package gate. config.json's
+        // "packages" list is no longer consulted here. cfg is still required for
+        // the RootOfTrust and keybox settings the generator needs.
         int uid = android.os.Process.myUid();
         String[] pkgs = ctx.getPackageManager().getPackagesForUid(uid);
         Config cfg = Config.current();
         if (cfg == null) {
             PiLog.d("skip: no config loaded (uid=" + uid + " pkgs=" + Arrays.toString(pkgs) + ")");
-            return null;
-        }
-        if (!cfg.matches(pkgs)) {
-            PiLog.d("skip: caller not targeted (uid=" + uid + " pkgs=" + Arrays.toString(pkgs) + ")");
             return null;
         }
 
@@ -112,13 +116,25 @@ public final class Hooks {
             return null;
         }
 
-        Certificate[] built = KeyboxChainGenerator.generate((X509Certificate) real[0], kb, cfg, ctx, uid);
+        // OS-wide, but only for genuine attestation requests: the real leaf must
+        // carry the key-attestation extension. This replaces the package gate --
+        // any app that attests is spoofed -- while an ordinary key (no extension)
+        // keeps its real chain, so unrelated keystore users are never clobbered.
+        X509Certificate realLeaf = (X509Certificate) real[0];
+        if (realLeaf.getExtensionValue(ATTESTATION_OID) == null) {
+            PiLog.d("skip: not an attestation request for " + alias
+                    + " (uid=" + uid + " pkgs=" + Arrays.toString(pkgs) + ")");
+            return null;
+        }
+
+        Certificate[] built = KeyboxChainGenerator.generate(realLeaf, kb, cfg, ctx, uid);
         if (built == null || built.length == 0) {
             PiLog.d("skip: generator returned nothing for " + alias);
             return null;
         }
         CACHE.put(alias, built);
-        PiLog.d("served spoofed chain for " + alias + " (" + built.length + " certs)");
+        PiLog.d("served spoofed chain for " + alias + " (" + built.length + " certs, uid=" + uid
+                + " pkgs=" + Arrays.toString(pkgs) + ")");
         return built;
     }
 
