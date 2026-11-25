@@ -1065,48 +1065,60 @@ function smaliApi() {
 # the next classesN.dex. The patched jar replaces the one in the tree in place.
 function patchFrameworkJar() {
   local jar="$1" hookDex="$2" apktool="$3" work="$4"
-  rm -rf "$work"
-  mkdir -p "$work/jar" "$work/smali"
-  (cd "$work/jar" && unzip -q "$jar")
+  local tmp smali_dir dex_name api target_dex patched_any=false
 
-  local targetDex='' d
-  for d in "$work"/jar/classes*.dex; do
-    if java -cp "$apktool" com.android.tools.smali.baksmali.Main list classes "$d" 2>/dev/null \
-        | grep -qx 'Landroid/security/keystore2/AndroidKeyStoreSpi;'; then
-      targetDex="$d"
-      break
-    fi
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/classes"
+
+  # Extract all dexes from framework.jar so TEE hooks can land in any dex
+  unzip -o "$jar" -d "$tmp/classes" >/dev/null
+
+  # Process each dex: disassemble, splice hooks, reassemble
+  for target_dex in "$tmp/classes"/classes*.dex; do
+    [ -f "$target_dex" ] || continue
+    dex_name="$(basename "$target_dex" .dex)"
+    smali_dir="$tmp/smali_$dex_name"
+    mkdir -p "$smali_dir"
+
+    api=$(smaliApi "$target_dex")
+
+    # Disassemble this dex
+    java -cp "$apktool" com.android.tools.smali.baksmali.Main disassemble -a "$api" "$target_dex" -o "$smali_dir"
+
+    # Splice hooks into this dex (chain() if AndroidKeyStoreSpi present, TEE hooks if KeyInfo/KeyCharacteristics present)
+    python3 -I integrity/insert_hook.py "$smali_dir"
+
+    # Reassemble this dex
+    java -cp "$apktool" com.android.tools.smali.smali.Main assemble -a "$api" "$smali_dir" -o "$target_dex"
+    patched_any=true
   done
-  if [[ -z "$targetDex" ]]; then
-    printRed 'AndroidKeyStoreSpi not found in any dex of framework.jar'
+
+  if [[ "$patched_any" != "true" ]]; then
+    printRed "No dexes found in $jar"
+    rm -rf "$tmp"
     exit 1
   fi
-  local api
-  api=$(smaliApi "$targetDex")
-  print "AndroidKeyStoreSpi in $(basename "$targetDex") (smali api $api); splicing hook"
 
-  java -cp "$apktool" com.android.tools.smali.baksmali.Main disassemble -a "$api" "$targetDex" -o "$work/smali"
-  python3 -I integrity/insert_hook.py "$work/smali"
-  java -cp "$apktool" com.android.tools.smali.smali.Main assemble -a "$api" "$work/smali" -o "$targetDex"
-
+  # Append hook dex as a new classesN.dex (same as original behavior)
   local count
-  count=$(find "$work/jar" -maxdepth 1 -name 'classes*.dex' | wc -l)
-  cp "$hookDex" "$work/jar/classes$((count + 1)).dex"
+  count=$(find "$tmp/classes" -maxdepth 1 -name 'classes*.dex' | wc -l)
+  cp "$hookDex" "$tmp/classes/classes$((count + 1)).dex"
 
-  # Repack: dexes stored uncompressed like a bootclasspath jar; keep any other
-  # entries exactly. Build to a temp name, then move over the tree's jar.
-  local out="$work/framework.jar"
+  # Repack: dexes stored uncompressed like a bootclasspath jar; keep any other entries exactly
+  local out="$tmp/framework.jar"
   rm -f "$out"
   local others=()
-  mapfile -t others < <(cd "$work/jar" && find . -type f ! -name 'classes*.dex' -printf '%P\n')
+  mapfile -t others < <(cd "$tmp/classes" && find . -type f ! -name 'classes*.dex' -printf '%P\n')
   (
-    cd "$work/jar"
+    cd "$tmp/classes"
     zip -q -X -0 "$out" classes*.dex
     if [[ ${#others[@]} -gt 0 ]]; then
       zip -q -X -g "$out" "${others[@]}"
     fi
   )
   mv "$out" "$jar"
+
+  rm -rf "$tmp"
 }
 
 # Writes /system/etc/playintegrity/config.json: which caller packages get a
