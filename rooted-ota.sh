@@ -1064,7 +1064,7 @@ function smaliApi() {
 # in the hook call (insert_hook.py), reassembles it, and appends the hook dex as
 # the next classesN.dex. The patched jar replaces the one in the tree in place.
 function patchFrameworkJar() {
-  local jar="$1" hookDex="$2" apktool="$3" work="$4"
+  local jar="$1" hookDex="$2" apktool="$3"
   local tmp smali_dir dex_name api target_dex patched_any=false
 
   tmp="$(mktemp -d)"
@@ -1198,7 +1198,7 @@ function buildIntegrityHook() {
   R8_JAR="$root/$INTEGRITY_TOOLS_DIR/r8.jar" \
   BC_JARS="$root/$INTEGRITY_TOOLS_DIR/bcprov.jar $root/$INTEGRITY_TOOLS_DIR/bcpkix.jar $root/$INTEGRITY_TOOLS_DIR/bcutil.jar" \
     bash integrity/build_hook.sh "$root/$build/hook.dex"
-  patchFrameworkJar "$jar" "$root/$build/hook.dex" "$root/$INTEGRITY_TOOLS_DIR/apktool.jar" "$root/$build/jarwork"
+  patchFrameworkJar "$jar" "$root/$build/hook.dex" "$root/$INTEGRITY_TOOLS_DIR/apktool.jar"
 
   # 3. The check must pass on the patched jar and fail on the stock one.
   python3 -I integrity/check_framework.py "$jar"
